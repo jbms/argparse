@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+set_and_check(jbms-argparse_INCLUDE_DIRS
+  "@PACKAGE_jbms-array_view_INCLUDE_DIR@"
+  )
+
+set_and_check(jbms-argparse_DOXYGEN_TAGFILE
+  "@PACKAGE_jbms-argparse_DOXYGEN_TAGFILE@"
+  )
+set_and_check(jbms-argparse_HTML_DIR
+  "@PACKAGE_jbms-argparse_HTML_DIR@"
+  )
+
+set(jbms-argparse_DOXYGEN_TAGFILES
+  "@PACKAGE_jbms-argparse_DOXYGEN_TAGFILE@=@PACKAGE_jbms-array_view_HTML_DIR@"
+  )
