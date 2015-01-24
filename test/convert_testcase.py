@@ -130,14 +130,25 @@ def convert_arg_str(s):
     return s.split()
 
 
-def get_argument_code(parser, arg, type_modifiers, result = None):
+def get_argument_code(parser, arg, type_modifiers):
+    # make a copy to avoid mutating the original
+    arg = Sig(*arg.args, **arg.kwargs)
 
-    if 'choices' in arg.kwargs:
-        raise RuntimeError('choices not supported')
+    # if 'help' in arg.kwargs:
+    #     h = arg.kwargs['help']
+    #     # C++ code does not support substitutions, so we remove them
+    #     h = h % dict(type = 'TYPE', const = 'CONST', choices = 'CHOICES', prog = 'PROG', dest = 'DEST', default = 'DEFAULT')
+    #     arg.kwargs['help'] = h
 
-    if result is None:
-        result = parser.add_argument(*arg.args, **arg.kwargs)
+    result = parser.add_argument(*arg.args, **arg.kwargs)
+    if result.help is not None and '%(' in result.help:
+        raise
+    
     t = result.type or str
+
+    choice_str = ''
+    if 'choices' in arg.kwargs:
+        choice_str = ', %s' % my_repr([t(x) for x in list(arg.kwargs['choices'])])
 
     suffix = ''
 
@@ -184,11 +195,11 @@ def get_argument_code(parser, arg, type_modifiers, result = None):
                 if type(const_value) != t:
                     const_value = t(const_value)
                     result.const = const_value
-                code = 'add_optional(%s, %s)%s' % (get_options_spec(arg), my_repr(const_value), default_value_str)
+                code = 'add_optional(%s, %s%s)%s' % (get_options_spec(arg), my_repr(const_value), choice_str, default_value_str)
             else:
                 if not result.option_strings and 'default' in arg.kwargs and arg.kwargs['default'] is not argparse.SUPPRESS:
                     # use default as missing value instead
-                    code = 'add_optional(%s, %s)' % (get_options_spec(arg), my_repr(default_value))
+                    code = 'add_optional(%s, %s%s)' % (get_options_spec(arg), my_repr(default_value), choice_str)
                 else:
                     type_modifiers[result.dest] = Optional
                     code = 'add_optional(%s)%s' % (get_options_spec(arg), default_value_str)
@@ -202,7 +213,7 @@ def get_argument_code(parser, arg, type_modifiers, result = None):
                     result.default = default_value
                 default_value_str = '.default_value(%s)' % my_repr(default_value)
 
-            code = 'add_multi(%s, %s)%s' % (get_options_spec(arg), get_nargs(arg.kwargs['nargs']), default_value_str)
+            code = 'add_multi(%s, %s%s)%s' % (get_options_spec(arg), get_nargs(arg.kwargs['nargs']), choice_str, default_value_str)
             #result.default = TypedList(str)
             #result.default = None
         else:
@@ -212,7 +223,7 @@ def get_argument_code(parser, arg, type_modifiers, result = None):
             else:
                 template_prefix = 'add'
 
-            code = '%s(%s)%s' % (template_prefix, get_options_spec(arg), default_value_str)
+            code = '%s(%s%s)%s' % (template_prefix, get_options_spec(arg), choice_str, default_value_str)
     elif isinstance(result, argparse._AppendConstAction):
         result.default = TypedList(type(fix_value(result.const)))
         code = 'add_append_flag(' + get_options_spec(arg) + ', ' + my_repr(result.const) + ')'
@@ -220,14 +231,14 @@ def get_argument_code(parser, arg, type_modifiers, result = None):
         result.default = TypedList(str)
         if 'nargs' in arg.kwargs:
             raise RuntimeError('nargs not supported for add_append')
-        code = 'add_append(' + get_options_spec(arg) + ')'
+        code = 'add_append(%s%s)' % (get_options_spec(arg), choice_str)
     elif isinstance(result, argparse._CountAction):
         result.default = 0
         type_modifiers[result.dest] = 'size_t'
         code = 'add_count(' + get_options_spec(arg) + ')'
     else:
         raise RuntimeError('unsupported action type: %r' % type(result))
-    return code + suffix
+    return (code + suffix, result)
 
 class TempDirMixin(object):
     pass
@@ -273,7 +284,7 @@ class ParserTestCaseMeta(type):
                 init_lines.append('p.add_help_option();')
 
             if init_lines:
-                print('  init([&](auto &p) {')
+                print('  init([&](auto const &p) {')
                 for line in init_lines:
                     print('    %s' % line)
                 print('  });')
@@ -281,19 +292,19 @@ class ParserTestCaseMeta(type):
             type_modifiers = dict()
 
             for arg in cls.argument_signatures:
-                code = get_argument_code(parser, arg, type_modifiers)
-                print('  args([&](auto &p) { p.%s; });' % (code,))
+                code, _ = get_argument_code(parser, arg, type_modifiers)
+                print('  args([&](auto const &p) { p.%s; });' % (code,))
                 
             #print('%s: args = %r' % (name, cls.argument_signatures))
 
             print('')
 
-            print('  failures(' + my_repr([convert_arg_str(x) for x in cls.failures]) + ');')
-
             for arg_str, ns_result_orig in cls.successes:
                 ns_result = parser.parse_args(convert_arg_str(arg_str)).__dict__
 
                 print('  success(' + my_repr(convert_arg_str(arg_str)) + ', ' + my_repr(convert_ns(ns_result, type_modifiers)) + ');')
+
+            print('  failures(' + my_repr([convert_arg_str(x) for x in cls.failures]) + ');')
 
             print('}')
 
@@ -307,6 +318,10 @@ class ParserTestCase(object, metaclass = ParserTestCaseMeta):
 class HelpTestCaseMeta(type):
     def __init__(cls, name, bases, dct):
         if name == 'HelpTestCase':
+            return
+
+        if name == 'TestHelpVariableExpansion':
+            # variable expansion not supported
             return
 
         lines = []
@@ -326,7 +341,7 @@ class HelpTestCaseMeta(type):
                     print('  // %s' % line)
             print('')
 
-            print('  ArgumentParser p;')
+            print('  auto p = make_parser();')
 
             parser_sig = Sig()
             if hasattr(cls, 'parser_signature'):
@@ -353,7 +368,7 @@ class HelpTestCaseMeta(type):
                     print('  p.%s(%s);' % (x, my_repr(val)))
 
             for arg in cls.argument_signatures:
-                code = get_argument_code(parser, arg, {})
+                code, _ = get_argument_code(parser, arg, {})
                 print('  p.%s;' % code)
 
             for group, arg_sigs in getattr(cls, 'argument_group_signatures', []):
@@ -364,7 +379,7 @@ class HelpTestCaseMeta(type):
                 print('  {')
                 print('    auto group = p.add_group(%s%s);' % (my_repr(py_group.title), group_suffix))
                 for arg in arg_sigs:
-                    code = get_argument_code(py_group, arg, {})
+                    code, _ = get_argument_code(py_group, arg, {})
                     print('    group.%s;' % code)
                 print('  }')
 
@@ -391,6 +406,8 @@ class HelpTestCaseMeta(type):
                 import textwrap
                 print('  std::ostringstream %s;' % help_type)
                 print('  ASSERT_NO_THROW(p.print_%s(%s, %d));' % (help_type,help_type,width))
+                #help_func = getattr(parser, ('format_%s' % help_type))
+                
                 print('  std::string %s_expected = %s;' % (help_type, my_repr(textwrap.dedent(getattr(cls,help_type)))))
                 print('  ASSERT_HELP_EQ(%s_expected, %s.str());' % (help_type, help_type))
 
@@ -439,8 +456,7 @@ def fix_parser_init_args(**kwargs):
 class Action(object):
     def __init__(self, parent, *args, **kwargs):
         self.parent = parent
-        self.py_obj = parent.py_obj.add_argument(*args, **kwargs)
-        code = get_argument_code(parent.py_obj, Sig(*args, **kwargs), parent.type_modifiers, self.py_obj)
+        code, self.py_obj = get_argument_code(parent.py_obj, Sig(*args, **kwargs), parent.type_modifiers)
         trace_state.print('%s.%s;' % (parent.name, code))
 
 class Subparsers(object):
@@ -566,7 +582,7 @@ class ErrorRaisingArgumentParser(object):
         kwargs.setdefault('prog', 'PROG')
         self.py_obj = ErrorRaisingArgumentParser_Impl(*args, **fix_parser_init_args(**kwargs))
         self.name = trace_state.get_name('p')
-        trace_state.print('ArgumentParser %s;' % self.name)
+        trace_state.print('auto %s = make_parser();' % self.name)
         print_parser_options(self.name, **kwargs)
     def add_argument(self, *args, **kwargs):
         return Action(self, *args, **kwargs)
@@ -668,8 +684,8 @@ class TestCaseMeta(type):
                             #print('  }')
                             print('}')                            
                         except RuntimeError as e:
-                            import traceback
-                            traceback.print_exc()
+                            #import traceback
+                            #traceback.print_exc()
                             sys.stderr.write('Skipping %s/%s: %r\n' % (name, method_name, e))
 
 

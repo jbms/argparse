@@ -16,7 +16,22 @@
 namespace jbms {
 namespace argparse {
 
-static void propagate_prog_name(detail::ArgumentParserImpl *impl_);
+using std::weak_ptr;
+
+string repr(string_view s) {
+  // FIXME: make this escape bad characters
+  string x;
+  x += '\'';
+  x += string(s);
+  x += '\'';
+  return x;
+}
+
+
+/**
+ * Generic utilities
+ **/
+inline namespace util {
 
 template <class Assoc, class Key>
 static auto find_ptr(Assoc const &assoc, Key const &key) {
@@ -58,15 +73,6 @@ static string replace_all(string_view s, string_view find_str, string_view repla
   return result;
 }
 
-static string repr(string_view s) {
-  // FIXME: make this escape bad characters
-  string x;
-  x += '\'';
-  x += string(s);
-  x += '\'';
-  return x;
-}
-
 template <class T>
 struct simple_range {
   T begin_, end_;
@@ -75,44 +81,52 @@ struct simple_range {
   T end() const { return end_; }
 };
 
-template <class Range, class Transform>
-static string join(string_view sep, Range const &args, Transform &&t) {
-  string result;
-  bool first = true;
-  for (auto const &x : args) {
-    if (!first) {
-      result += string(sep);
-    }
-    first = false;
-    result += string(t(x));
-  }
-  return result;
-}
 
-template <class Range, class Transform, class Predicate>
-static string join_if(string_view sep, Range const &args, Transform &&t, Predicate &&p) {
-  string result;
+struct always_true_pred {
+  template <class... T>
+  bool operator()(T &&...) {
+    return true;
+  }
+};
+
+struct identity {
+  template <class T>
+  T &&operator()(T &&x) { return std::forward<T>(x); }
+};
+
+template <class Range, class Transform = identity, class Predicate = always_true_pred>
+void join(std::ostream &os, string_view sep, Range const &args, Transform &&t = {}, Predicate &&p = {}) {
   bool first = true;
   for (auto const &x : args) {
     if (!p(x))
       continue;
-
-    if (!first) {
-      result += string(sep);
-    }
+    if (!first)
+      os << sep;
     first = false;
-    result += string(t(x));
+    os << t(x);
   }
-  return result;
 }
 
-template <class Range>
-static string join(string_view sep, Range const &args) {
-  return join(sep, args, [](auto const &x) -> decltype(x) { return x; });
+template <class Range, class Transform = identity, class Predicate = always_true_pred>
+static string join(string_view sep, Range const &args, Transform &&t = {}, Predicate &&p = {}) {
+  std::ostringstream ostr;
+  join(ostr, sep, args, std::forward<Transform>(t), std::forward<Predicate>(p));
+  return ostr.str();
+}
+
+} // end namespace jbms::argparse::util
+
+
+namespace detail {
+
+[[noreturn]] void handle_type_conversion_failure(const char *name, string_view s) {
+  throw std::invalid_argument("invalid " + boost::core::demangle(name) + " value: " + repr(s));
+}
+
 }
 
 
-static void get_nargs_range(Nargs nargs, size_t &min, size_t &max) {
+static void get_nargs_range(NargsValue nargs, size_t &min, size_t &max) {
   switch (nargs) {
   case OPTIONAL:
     min = 0; max = 1;
@@ -137,20 +151,35 @@ static void get_nargs_range(Nargs nargs, size_t &min, size_t &max) {
   throw std::logic_error("Invalid nargs value encountered");
 }
 
-namespace detail {
 
-[[noreturn]] void handle_type_conversion_failure(const char *name, string_view s) {
-  throw std::invalid_argument("invalid " + boost::core::demangle(name) + " value: " + repr(s));
-}
-
-class ArgumentImpl {
+class GenericArgument {
 public:
-
-  MutuallyExclusiveGroup::Impl *mutex_group = nullptr;
-  ArgumentGroup::Impl *group = nullptr;
 
   string dest;
   vector<string> option_strings;
+  optional<string> help = string{};
+  vector<string> metavar;
+  bool required = false;
+  NargsValue nargs = NARGS_INVALID;
+
+  Handler handler;
+  CopyHandler copy_handler;
+
+  any default_value;
+
+  struct ChoiceInfo {
+    ChoiceInfo(string name, string invocation, OptionalString help)
+      : name(name), invocation(invocation), help(help)
+    {}
+    string name;
+    string invocation;
+    optional<string> help;
+  };
+
+  vector<ChoiceInfo> choice_help;
+
+  MutuallyExclusiveGroup::Impl *mutex_group = nullptr; // this is only set if the argument is part of a mutually-exclusive group
+  weak_ptr<ArgumentGroup::Impl> group; // note: This is always set
 
   string name() const {
     if (!option_strings.empty())
@@ -165,21 +194,34 @@ public:
 
   bool is_help_suppressed() const { return !help; }
 
-  optional<string> help = string{};
-  vector<string> metavar;
-  bool required = false;
-  Nargs nargs = NARGS_INVALID;
-  Handler handler;
-  any default_value;
-  virtual ~ArgumentImpl() {}
-
-  virtual std::unique_ptr<ArgumentImpl> clone() {
-    return std::make_unique<ArgumentImpl>(*this);
+  virtual shared_ptr<GenericArgument> clone_for(ArgumentParser const &parser) {
+    shared_ptr<GenericArgument> x(new GenericArgument);
+    x->dest = this->dest;
+    x->option_strings = this->option_strings;
+    x->help = this->help;
+    x->metavar = this->metavar;
+    x->required = this->required;
+    x->nargs = this->nargs;
+    x->copy_handler = this->copy_handler;
+    if (x->copy_handler)
+      x->handler = x->copy_handler(*x, this->handler);
+    else
+      x->handler = this->handler;
+    x->default_value = this->default_value;
+    x->choice_help = this->choice_help;
+    return x;
   }
 
   string format_metavar(size_t i) const {
     if (!metavar.empty())
       return metavar[std::min(metavar.size() - 1, i)];
+    if (!choice_help.empty()) {
+      std::ostringstream ostr;
+      ostr << '{';
+      join(ostr, ",", choice_help, [](auto const &x) { return x.name; });
+      ostr << '}';
+      return ostr.str();
+    }
     if (is_positional())
       return dest;
     return ascii_to_upper(dest);
@@ -187,13 +229,12 @@ public:
 };
 
 
-
-void set_help(ArgumentImpl &impl, optional<string> help) {
-  impl.help = std::move(help);
+void set_help(GenericArgument &arg, OptionalString help) {
+  arg.help = std::move(help);
 }
 
-void set_nargs(ArgumentImpl &impl, Nargs nargs) {
-  if (impl.is_positional() && nargs == Nargs(0))
+void set_nargs(GenericArgument &impl, Nargs nargs) {
+  if (impl.is_positional() && nargs.value == NargsValue(0))
     throw std::logic_error("nargs cannot be 0 for positional arguments");
   impl.nargs = nargs;
 
@@ -211,97 +252,102 @@ void set_nargs(ArgumentImpl &impl, Nargs nargs) {
     }
   }
 }
-void set_required(ArgumentImpl &impl, bool value) {
+
+void set_required(GenericArgument &impl, bool value) {
   if (impl.is_positional())
     throw std::logic_error("required is not a valid option for positional arguments");
   impl.required = value;
 }
 
-void set_default_value(ArgumentImpl &impl, any value) {
+void set_default_value(GenericArgument &impl, any value) {
   impl.default_value = value;
 }
 
-void set_handler(ArgumentImpl &impl, Handler handler) {
-  impl.handler = handler;
+
+void set_metavar(GenericArgument &impl_, OptionsSpec value) {
+  impl_.metavar = std::move(value);
 }
 
-void set_metavar(ArgumentImpl &impl_, OptionsSpec value) {
-  impl_.metavar = std::move(value.spec);
+void set_handler(GenericArgument &arg, Handler handler, CopyHandler copy_handler) {
+  arg.handler = std::move(handler);
+  arg.copy_handler = std::move(copy_handler);
 }
 
+Handler &get_handler(GenericArgument &impl) { return impl.handler; }
 
+void add_choice_help(GenericArgument &arg, string name, string invocation, OptionalString help) {
+  arg.choice_help.emplace_back(std::move(name), std::move(invocation), std::move(help));
+}
+
+string const &get_dest(GenericArgument &arg) {
+  return arg.dest;
+}
+
+ArgumentParser get_parser(GenericArgument &arg) {
+  return ArgumentGroup(arg.group.lock()).get_parser();
 }
 
 struct ArgumentGroup::Impl {
-  vector<detail::ArgumentImpl const *> actions;
+  vector<GenericArgument const *> actions;
   string title, description;
-  detail::ArgumentParserImpl *parent;
+  weak_ptr<ArgumentParser::Impl> parser;
 
-  std::unique_ptr<Impl> clone() {
-    auto x = std::make_unique<Impl>();
+  shared_ptr<Impl> clone() {
+    shared_ptr<Impl> x(new Impl);
     x->title = title;
     x->description = description;
     return x;
   }
-
-  void register_argument_impl(detail::ArgumentImpl *arg) {
-    arg->group = this;
-    actions.push_back(arg);
-  }
 };
 
-ArgumentGroup &ArgumentGroup::title(string title) {
-  impl_->title = std::move(title);
+
+ArgumentGroup ArgumentGroup::title(string title) const {
+  impl->title = std::move(title);
   return *this;
 }
 
-ArgumentGroup &ArgumentGroup::description(string description) {
-  impl_->description = std::move(description);
+ArgumentGroup ArgumentGroup::description(string description) const {
+  impl->description = std::move(description);
   return *this;
 }
-
 
 struct MutuallyExclusiveGroup::Impl {
-  vector<detail::ArgumentImpl const *> actions;
-  ArgumentGroup::Impl *parent_group = nullptr;
-  detail::ArgumentParserImpl *parent = nullptr;
+  vector<GenericArgument const *> actions;
+  weak_ptr<ArgumentParser::Impl> parser;
   bool required;
 
-  std::unique_ptr<Impl> clone() {
-    auto x = std::make_unique<Impl>();
+  shared_ptr<Impl> clone() {
+    shared_ptr<Impl> x(new Impl);
     x->required = required;
     return x;
   }
-
-
-  void register_argument_impl(detail::ArgumentImpl *arg_impl);
 };
 
-namespace detail {
-struct ArgumentParserImpl {
+struct ArgumentParser::Impl {
   string prog;
-  bool prog_set_explicitly = false;
+  weak_ptr<ArgumentParser::Impl> prog_super_parser;
+
+  string get_prog() const {
+    if (auto super_parser = prog_super_parser.lock()) {
+      return super_parser->get_prog() + " " + prog;
+    }
+    return prog;
+  }
+
   char default_prefix = '-';
   string description;
   string epilog;
   optional<string> usage;
 
   // Default grouping of arguments
-  ArgumentGroup::Impl positional_group, optional_group;
+  ArgumentGroup positional_group, optional_group;
 
-  void register_argument_impl(detail::ArgumentImpl *arg) {
-    if (arg->is_positional())
-      positional_group.actions.push_back(arg);
-    else
-      optional_group.actions.push_back(arg);
-  }
+  vector<ArgumentGroup> groups;
+  vector<shared_ptr<MutuallyExclusiveGroup::Impl>> mutex_groups;
 
-  vector<std::unique_ptr<ArgumentGroup::Impl>> groups;
-  vector<std::unique_ptr<MutuallyExclusiveGroup::Impl>> mutex_groups;
+  vector<shared_ptr<GenericArgument>> actions;
 
-  vector<std::unique_ptr<detail::ArgumentImpl>> actions;
-
-  std::unordered_map<string_view,detail::ArgumentImpl const *> option_string_actions;
+  std::unordered_map<string_view,GenericArgument const *> option_string_actions;
 
   string prefix_chars = "-";
 
@@ -318,77 +364,74 @@ struct ArgumentParserImpl {
   bool is_negative_number(string_view s) const {
     return regex_search(s.begin(), s.end(), negative_number_re);
   }
-
-  ArgumentParserImpl() {
-    positional_group.title = "positional arguments";
-    optional_group.title = "optional arguments";
-  }
-
-  void copy_from(ArgumentParserImpl *parent);
-
-  std::unique_ptr<ArgumentParserImpl> clone() {
-    auto result = std::make_unique<ArgumentParserImpl>();
-    result->prog = prog;
-    result->prog_set_explicitly = prog_set_explicitly;
-    result->default_prefix = default_prefix;
-    result->description = description;
-    result->epilog = epilog;
-    result->usage = usage;
-    result->prefix_chars = prefix_chars;
-    result->ignore_options_string = ignore_options_string;
-    result->has_negative_number_options = has_negative_number_options;
-    result->copy_from(this);
-    return result;
-  }
 };
 
+ArgumentParser ArgumentParser::get_parser() const { return *this; }
+ArgumentParser ArgumentGroup::get_parser() const { return ArgumentParser(impl->parser.lock()); }
+ArgumentParser MutuallyExclusiveGroup::get_parser() const { return ArgumentParser(impl->parser.lock()); }
+
+
+void copy_actions(ArgumentParser const &source, ArgumentParser const &dest);
+
+ArgumentParser ArgumentParser::clone() const {
+  auto p = make_parser();
+  p.impl->prog = impl->prog;
+  p.impl->default_prefix = impl->default_prefix;
+  p.impl->description = impl->description;
+  p.impl->epilog = impl->epilog;
+  p.impl->usage = impl->usage;
+  p.impl->prefix_chars = impl->prefix_chars;
+  p.impl->ignore_options_string = impl->ignore_options_string;
+  p.impl->has_negative_number_options = impl->has_negative_number_options;
+  p.parent(*this);
+  return p;
 }
-detail::ArgumentParserImpl *ArgumentParser::get_parser_impl() { return impl_.get(); }
-detail::ArgumentParserImpl *ArgumentGroup::get_parser_impl() { return impl_->parent; }
 
-void ArgumentParser::register_argument_impl(detail::ArgumentImpl *arg) { impl_->register_argument_impl(arg); }
-void ArgumentGroup::register_argument_impl(detail::ArgumentImpl *arg) { impl_->register_argument_impl(arg); }
+ArgumentParser make_parser() {
+  ArgumentParser p;
+  p.impl.reset(new ArgumentParser::Impl);
+  p.impl->positional_group = p.add_group("positional arguments");
+  p.impl->optional_group = p.add_group("optional arguments");
+  return p;
+}
 
-void MutuallyExclusiveGroup::Impl::register_argument_impl(detail::ArgumentImpl *arg_impl) {
-  arg_impl->mutex_group = this;
-  actions.push_back(arg_impl);
-  if (parent_group)
-    parent_group->register_argument_impl(arg_impl);
+
+static void register_argument(GenericArgument &arg, shared_ptr<ArgumentGroup::Impl> const &group) {
+  arg.group = group; // create weak reference
+  group->actions.push_back(&arg);
+}
+
+static void register_argument(GenericArgument &arg, shared_ptr<ArgumentParser::Impl> const &parser) {
+  register_argument(arg, arg.is_positional() ? parser->positional_group.impl : parser->optional_group.impl);
+}
+
+static void register_argument(GenericArgument &arg, shared_ptr<MutuallyExclusiveGroup::Impl> const &mutex_group,
+                              shared_ptr<ArgumentGroup::Impl> const &group = {}) {
+  arg.mutex_group = mutex_group.get();
+  mutex_group->actions.push_back(&arg);
+  if (group)
+    register_argument(arg, group);
   else
-    parent->register_argument_impl(arg_impl);
+    register_argument(arg, mutex_group->parser.lock());
 }
 
-void MutuallyExclusiveGroup::register_argument_impl(detail::ArgumentImpl *arg_impl) { impl_->register_argument_impl(arg_impl); }
-detail::ArgumentParserImpl *MutuallyExclusiveGroup::get_parser_impl() { return impl_->parent; }
-
-
-
-MutuallyExclusiveGroup ArgumentGroup::add_mutually_exclusive_group(bool required) {
-  impl_->parent->mutex_groups.push_back(std::make_unique<MutuallyExclusiveGroup::Impl>());
-  auto ptr = impl_->parent->mutex_groups.back().get();
-  ptr->required = required;
-  ptr->parent = impl_->parent;
-  ptr->parent_group = impl_;
-  MutuallyExclusiveGroup g;
-  g.impl_ = ptr;
-  return g;
+MutuallyExclusiveGroup ArgumentGroup::add_mutually_exclusive_group(bool required) const {
+  return get_parser().add_mutually_exclusive_group(required)[*this];
 }
 
-MutuallyExclusiveGroup ArgumentParser::add_mutually_exclusive_group(bool required) {
-  impl_->mutex_groups.push_back(std::make_unique<MutuallyExclusiveGroup::Impl>());
-  auto ptr = impl_->mutex_groups.back().get();
-  ptr->required = required;
-  ptr->parent = impl_.get();
-  MutuallyExclusiveGroup g;
-  g.impl_ = ptr;
-  return g;
+MutuallyExclusiveGroup ArgumentParser::add_mutually_exclusive_group(bool required) const {
+  shared_ptr<MutuallyExclusiveGroup::Impl> g_impl(new MutuallyExclusiveGroup::Impl);
+  g_impl->parser = impl;
+  g_impl->required = required;
+  impl->mutex_groups.push_back(g_impl);
+  return MutuallyExclusiveGroup(g_impl);
 }
 
 namespace detail {
 struct ParserState {
   ArgumentParser parser;
   Result &parse_result;
-  detail::ArgumentParserImpl &impl() { return *parser.impl_; }
+  auto &impl() { return *parser.impl; }
 
 
   /**
@@ -415,14 +458,14 @@ struct ParserState {
   bool ignore_options = false;
 
 
-  vector<ArgumentImpl const *> positional_actions;
+  vector<GenericArgument const *> positional_actions;
 
   /**
    * Normally we try exhaustive matching.  If there are PARSER or REMAINDER positional arguments, though, exhaustive matching wouldn't be well-defined.
    **/
   bool greedy_parsing = false;
 
-  std::unordered_map<MutuallyExclusiveGroup::Impl *,ArgumentImpl const *> mutex_group_to_seen_arg;
+  std::unordered_map<MutuallyExclusiveGroup::Impl *,GenericArgument const *> mutex_group_to_seen_arg;
 
   ParserState(ArgumentParser const &parser, Result &parse_result, vector<string_view> input)
     : parser(parser), parse_result(parse_result), input(std::move(input))
@@ -462,7 +505,7 @@ struct ParserState {
     /**
      * Action matched.
      **/
-    ArgumentImpl const *action = nullptr;
+    GenericArgument const *action = nullptr;
 
     /**
      * If true, indicates that \ref argument can only be an argument.  Otherwise, \ref argument may be either an argument or additional single-character options.
@@ -628,7 +671,7 @@ struct ParserState {
     ++arg_index;
   }
 
-  void check_argument_count(size_t count, size_t min, size_t max, Nargs nargs) {
+  void check_argument_count(size_t count, size_t min, size_t max, NargsValue nargs) {
     if (count < min) {
       if (nargs == PARSER)
         throw std::invalid_argument("expected A... arguments");
@@ -642,7 +685,7 @@ struct ParserState {
     }
   }
 
-  vector<string_view> consume_arguments(Nargs nargs, bool is_positional) {
+  vector<string_view> consume_arguments(NargsValue nargs, bool is_positional) {
     vector<string_view> result;
     size_t min, max;
     get_nargs_range(nargs, min, max);
@@ -692,18 +735,18 @@ struct ParserState {
   vector<string_view> extras;
 
   struct PendingAction {
-    ArgumentImpl const *action;
-    string_view option_string; // reference to data in an ArgumentImpl
+    GenericArgument const *action;
+    string_view option_string; // reference to data in an GenericArgument
     vector<string_view> args;
-    PendingAction(ArgumentImpl const *action, string_view option_string,
+    PendingAction(GenericArgument const *action, string_view option_string,
                   vector<string_view> args)
       : action(action), option_string(option_string), args(std::move(args))
     {}
   };
 
-  std::unordered_set<ArgumentImpl const *> seen_actions;
+  std::unordered_set<GenericArgument const *> seen_actions;
 
-  void take_action(ArgumentImpl const *action, string_view option_string, vector<string_view> args) {
+  void take_action(GenericArgument const *action, string_view option_string, vector<string_view> args) {
     seen_actions.insert(action);
     (void)option_string;
 
@@ -957,7 +1000,7 @@ struct ParserState {
         continue;
       throw std::invalid_argument(
           "one of the arguments " +
-          join_if(" ", group->actions, [](auto a) { return a->name(); }, [](auto a) { return !a->is_help_suppressed(); }) +
+          join(" ", group->actions, [](auto a) { return a->name(); }, [](auto a) { return !a->is_help_suppressed(); }) +
           " is required");
     }
   }
@@ -966,49 +1009,35 @@ struct ParserState {
 
 }
 
-ArgumentParser::ArgumentParser()
-  : impl_(std::make_shared<detail::ArgumentParserImpl>()) {
-}
-
-ArgumentParser::~ArgumentParser()
-{}
-
 ArgumentGroup ArgumentParser::add_group(string title, string description) {
-  impl_->groups.emplace_back(new ArgumentGroup::Impl);
-  auto group_impl = impl_->groups.back().get();
-  group_impl->parent = impl_.get();
-  group_impl->title = std::move(title);
-  group_impl->description = std::move(description);
-  return ArgumentGroup(group_impl);
+  ArgumentGroup group(std::shared_ptr<ArgumentGroup::Impl>(new ArgumentGroup::Impl));
+  group.impl->parser = impl;
+  group.impl->title = title;
+  group.impl->description = description;
+  impl->groups.push_back(group);
+  return group;
 }
 
-static void register_option_strings(detail::ArgumentParserImpl *impl_, detail::ArgumentImpl *arg_impl) {
-  for (auto const &option_string : arg_impl->option_strings) {
-    if (!impl_->option_string_actions.emplace(option_string, arg_impl).second) {
+static void register_option_strings(shared_ptr<ArgumentParser::Impl> const &impl, GenericArgument &arg) {
+  for (auto const &option_string : arg.option_strings) {
+    if (!impl->option_string_actions.emplace(option_string, &arg).second) {
       throw std::logic_error("conflicting option string: " + option_string);
     }
   }
 }
 
 /**
- * Constructs an ArgumentImpl based on \p spec and registers it with the argument parser.
+ * Constructs a new GenericArgument based on \p spec and registers it with the argument parser.
  *
  * This does not add the argument to any argument group.
- *
- * \param arg_impl If non-null, this object (which may be an instance of a subclass of ArgumentImpl) is used instead of constructing a new ArgumentImpl.
  **/
-static detail::ArgumentImpl &
-make_argument_impl_helper(detail::ArgumentParserImpl *impl_, OptionsSpec spec, detail::ArgumentImpl *arg_impl) {
-  impl_->actions.emplace_back(arg_impl ? arg_impl : new detail::ArgumentImpl);
-  arg_impl = impl_->actions.back().get();
-  //arg_impl->parent = impl_;
-
-  auto const &names = spec.spec;
+static shared_ptr<GenericArgument> make_argument(shared_ptr<ArgumentParser::Impl> const &impl, OptionsSpec names) {
+  shared_ptr<GenericArgument> arg_impl(new GenericArgument);
 
   if (names.empty())
     throw std::logic_error("Invalid argument specification");
 
-  if (names.size() == 1 && (names.front().empty() || !impl_->is_prefix_char(names[0][0]))) {
+  if (names.size() == 1 && (names.front().empty() || !impl->is_prefix_char(names[0][0]))) {
     // positional argument
     arg_impl->dest = std::move(names[0]);
   } else {
@@ -1017,7 +1046,7 @@ make_argument_impl_helper(detail::ArgumentParserImpl *impl_, OptionsSpec spec, d
     size_t name_i = 0;
 
     if (names[0].empty() ||
-        !impl_->is_prefix_char(names[0][0])) {
+        !impl->is_prefix_char(names[0][0])) {
       // first name specifies the dest
       dest = names[0];
       name_i = 1;
@@ -1025,14 +1054,14 @@ make_argument_impl_helper(detail::ArgumentParserImpl *impl_, OptionsSpec spec, d
 
     for (; name_i < names.size(); ++name_i) {
       auto const &name = names[name_i];
-      if (name.empty() || !impl_->is_prefix_char(name[0]))
+      if (name.empty() || !impl->is_prefix_char(name[0]))
         throw std::logic_error("invalid option string " + repr(name) + ": must start with a character " +
-                               repr(impl_->prefix_chars));
-      if (impl_->is_negative_number(name))
-        impl_->has_negative_number_options = true;
+                               repr(impl->prefix_chars));
+      if (impl->is_negative_number(name))
+        impl->has_negative_number_options = true;
 
       arg_impl->option_strings.emplace_back(name);
-      if (long_option.empty() && name.size() >= 2 && impl_->is_prefix_char(name[1]))
+      if (long_option.empty() && name.size() >= 2 && impl->is_prefix_char(name[1]))
         long_option = name;
     }
     if (long_option.empty())
@@ -1040,46 +1069,36 @@ make_argument_impl_helper(detail::ArgumentParserImpl *impl_, OptionsSpec spec, d
     if (dest.empty()) {
       // trim off the prefix characters
       size_t j = 0;
-      while (j < long_option.size() && impl_->is_prefix_char(long_option[j]))
+      while (j < long_option.size() && impl->is_prefix_char(long_option[j]))
         ++j;
       dest = long_option.substr(j);
     }
     arg_impl->dest = string(dest);
 
-    register_option_strings(impl_, arg_impl);
+    register_option_strings(impl, *arg_impl);
   }
 
-  return *arg_impl;
+  impl->actions.push_back(arg_impl);
+  return arg_impl;
 }
 
-namespace detail {
-
-detail::ArgumentImpl &make_argument_impl(ArgumentContainer *container, OptionsSpec spec, detail::ArgumentImpl *arg_impl = nullptr) {
-  auto &arg = make_argument_impl_helper(container->get_parser_impl(), std::move(spec), arg_impl);
-  container->register_argument_impl(&arg);
+shared_ptr<GenericArgument> ArgumentParser::add_generic(OptionsSpec spec) const {
+  auto arg = make_argument(impl, std::move(spec));
+  register_argument(*arg, impl);
   return arg;
 }
 
-detail::ArgumentImpl &ArgumentContainer::make_argument_impl(OptionsSpec spec) {
-  return detail::make_argument_impl(this, std::move(spec));
-}
-}
-
-
-namespace detail {
-ArgumentBase::ArgumentBase(ArgumentImpl *impl_)
-  : impl_(impl_), dest_(impl_->dest) {
-}
+shared_ptr<GenericArgument> ArgumentGroup::add_generic(OptionsSpec spec) const {
+  auto arg = make_argument(impl->parser.lock(), std::move(spec));
+  register_argument(*arg, impl);
+  return arg;
 }
 
-struct HelpFormatterParameters {
-  string prog;
-  int indent_increment = 2;
-  int max_help_position = 24;
-  int width = 0;
-  int min_text_width = 11;
-};
-
+shared_ptr<GenericArgument> MutuallyExclusiveGroup::add_generic(OptionsSpec spec) const {
+  auto arg = make_argument(impl->parser.lock(), std::move(spec));
+  register_argument(*arg, impl, group.impl);
+  return arg;
+}
 
 /* input should contain only spaces as whitespace */
 static vector<string> wordwrap_paragraph(string_view input, size_t width) {
@@ -1122,38 +1141,10 @@ static vector<string> wordwrap_paragraph(string_view input, size_t width) {
   return output;
 }
 
-
-
 void ParseError::handle() const {
   parser().print_usage(std::cerr);
-  std::cerr << parser().impl_->prog << ": error: " << what() << std::endl;
+  std::cerr << parser().impl->prog << ": error: " << what() << std::endl;
   std::exit(1);
-}
-
-static void parse_helper(ArgumentParser const &parser, Result &result, vector<string_view> args) {
-  auto impl_ = parser.impl_.get();
-
-  // We will set a prog name automatically for all subparsers if they don't already have a prog name explicitly specified
-  propagate_prog_name(impl_);
-
-  try {
-    detail::ParserState state(parser, result, args);
-    state.set_defaults();
-
-    if (state.greedy_parsing)
-      state.parse_greedy();
-    else
-      state.parse_exhaustive();
-
-    state.check_required();
-
-    if (!state.extras.empty()) {
-      throw std::invalid_argument("unrecognized arguments: " + join(" ", state.extras));
-    }
-  }
-  catch (std::invalid_argument &e) {
-    throw ParseError(parser, e.what());
-  }
 }
 
 /**
@@ -1193,8 +1184,8 @@ void ArgumentParser::parse(Result &result, vector<string_view> args) const {
 }
 
 Result ArgumentParser::try_parse(int argc, char **argv) const {
-  if (argc > 0 && impl_->prog.empty()) {
-    impl_->prog = argv[0];
+  if (argc > 0 && impl->prog.empty()) {
+    impl->prog = argv[0];
   }
 
   Result result;
@@ -1202,235 +1193,125 @@ Result ArgumentParser::try_parse(int argc, char **argv) const {
   for (int i = 1; i < argc; ++i)
     args.push_back(argv[i]);
 
-  parse_helper(*this, result, std::move(args));
+  try_parse(result, std::move(args));
 
   return result;
 }
 
 Result ArgumentParser::try_parse(vector<string_view> args) const {
   Result result;
-  parse_helper(*this, result, std::move(args));
+  try_parse(result, std::move(args));
   return result;
 }
 
 
 void ArgumentParser::try_parse(Result &result, vector<string_view> args) const {
-  parse_helper(*this, result, std::move(args));
+  try {
+    detail::ParserState state(*this, result, args);
+    state.set_defaults();
+
+    if (state.greedy_parsing)
+      state.parse_greedy();
+    else
+      state.parse_exhaustive();
+
+    state.check_required();
+
+    if (!state.extras.empty()) {
+      throw std::invalid_argument("unrecognized arguments: " + join(" ", state.extras));
+    }
+  }
+  catch (std::invalid_argument &e) {
+    throw ParseError(*this, e.what());
+  }
 }
 
 
-namespace detail {
+/**
+ * Help and version commands
+ **/
 
-struct SubparserEntry {
-  ArgumentParser parser;
-  vector<string> names;
-  optional<string> short_desc;
 
-  string format_invocation() const {
-    string s = names.front();
-    if (names.size() > 1) {
-      s += " (";
-      for (size_t i = 1; i < names.size(); ++i) {
-        if (i > 1)
-          s += ", ";
-        s += names[i];
-      }
-      s += ')';
-    }
-    return s;
+Argument<void> ArgumentContainer::add_help_option(OptionsSpec spec, HelpFormatterParameters const &params) const {
+  if (spec.empty()) {
+    auto p = get_parser();
+    spec = { string(1, p.impl->default_prefix) + "h", string(2, p.impl->default_prefix) + "help" };
   }
-};
+  auto generic = add_generic(std::move(spec));
+  set_nargs(*generic, 0);
 
-class SubparsersArgumentImpl : public ArgumentImpl {
-public:
-
-  void initialize() {
-    set_nargs(*this, PARSER);
-    handler = [this](ArgumentParser const &, Result &result, string_view, vector<string_view> values) {
-      auto command = values.front();
-      if (!dest.empty())
-        result[dest] = string(command);
-
-      auto it = parser_map.find(command);
-      if (it == parser_map.end()) {
-        string command_metavar = format_metavar(0);
-        if (command_metavar.empty())
-          command_metavar = "command";
-        throw std::invalid_argument("unknown " + command_metavar + " " + repr(command));
-      }
-
-      auto const &e = parsers[it->second];
-      values.erase(values.begin());
-      parse_helper(e.parser, result, values);
-    };
-  }
-
-  SubparsersArgumentImpl() = default;
-  SubparsersArgumentImpl(ArgumentImpl const &x) : ArgumentImpl(x) {}
-
-  std::unordered_map<string_view,size_t> parser_map;
-
-  std::vector<SubparserEntry> parsers;
-
-  virtual std::unique_ptr<ArgumentImpl> clone() override {
-    auto x = std::make_unique<SubparsersArgumentImpl>(*this);
-    x->parser_map = parser_map;
-    for (auto const &parser : x->parsers) {
-      x->parsers.emplace_back();
-      auto &new_parser = x->parsers.back();
-      new_parser = parser;
-      new_parser.parser.impl_ = parser.parser.impl_->clone();
-    }
-    return std::move(x);
-  }
-};
-
-Argument<void> ArgumentContainer::add_help_option(OptionsSpec spec) {
-  auto &arg_impl = this->make_argument_impl(std::move(spec));
-  set_nargs(arg_impl, Nargs(0));
-
-  set_handler(arg_impl, [](ArgumentParser const &parser, Result &, string const &, vector<string_view>) {
-    parser.print_help(std::cout);
-    std::exit(0);
+  set_handler(*generic, [params](ArgumentParser const &parser, Result &, string const &, vector<string_view> const &) {
+      parser.print_help(std::cout, params);
+      std::exit(0);
   });
-  set_help(arg_impl, string("show this help message and exit"));
-  return Argument<void>(&arg_impl);
+  set_help(*generic, "show this help message and exit");
+  return Argument<void>(std::move(generic));
 }
 
-Argument<void> ArgumentContainer::add_help_option() {
-  auto impl_ = get_parser_impl();
-  return add_help_option({ string(1, impl_->default_prefix) + "h", string(2, impl_->default_prefix) + "help" });
-}
+Argument<void> ArgumentContainer::add_print_option(OptionsSpec spec, string message) const {
+  auto generic = add_generic(std::move(spec));
+  set_nargs(*generic, 0);
 
-
-Argument<void> ArgumentContainer::add_print_option(OptionsSpec spec, string message) {
-  auto &arg_impl = this->make_argument_impl(std::move(spec));
-  set_nargs(arg_impl, Nargs(0));
-
-  set_handler(arg_impl,
-              [ message = std::move(message) ](ArgumentParser const &, Result &, string const &, vector<string_view>) {
+  set_handler(*generic,
+              [ message = std::move(message) ](ArgumentParser const &, Result &, string const &, vector<string_view> const &) {
     std::cout << message;
     if (!message.empty() && message.back() != '\n')
       std::cout << '\n';
     std::cout << std::flush;
     std::exit(0);
   });
-  return Argument<void>(&arg_impl);
+  return Argument<void>(std::move(generic));
 }
 
-Argument<void> ArgumentContainer::add_version_option(OptionsSpec spec, string message) {
+Argument<void> ArgumentContainer::add_version_option(OptionsSpec spec, string message) const {
   return add_print_option(std::move(spec), std::move(message)).help("show program's version number and exit");
 }
 
-Argument<void> ArgumentContainer::add_version_option(string message) {
-  auto impl_ = get_parser_impl();
-  return add_version_option({ string(1, impl_->default_prefix) + "v", string(2, impl_->default_prefix) + "version" }, message);
-}
-
-Subparsers ArgumentContainer::add_subparsers(OptionsSpec spec) {
-  auto arg_impl = new detail::SubparsersArgumentImpl;
-  detail::make_argument_impl(this, std::move(spec), arg_impl);
-  arg_impl->initialize();
-  return Subparsers(arg_impl);
-}
-
-Subparsers ArgumentContainer::add_subparsers() {
-  return add_subparsers(""/* empty dest */);
+Argument<void> ArgumentContainer::add_version_option(string message) const {
+  auto p = get_parser();
+  return add_version_option({ string(1, p.impl->default_prefix) + "v", string(2, p.impl->default_prefix) + "version" }, message);
 }
 
 
-}
 
-static void propagate_prog_name(detail::ArgumentParserImpl *impl_) {
-  if (impl_->prog.empty())
-    return;
-  // set prog name for all subparser parsers
-  for (auto const &action : impl_->actions) {
-    if (auto subparsers_impl = dynamic_cast<detail::SubparsersArgumentImpl *>(action.get())) {
-      for (auto const &e : subparsers_impl->parsers) {
-        auto p_impl = e.parser.impl_.get();
-        if (!p_impl->prog_set_explicitly) {
-          p_impl->prog = impl_->prog + " " + e.names.front();
-        }
-      }
-    }
-  }
-}
 
-ArgumentParser &ArgumentParser::prog(string prog_name) {
-  impl_->prog = prog_name;
-  impl_->prog_set_explicitly = true;
-  propagate_prog_name(impl_.get());
+ArgumentParser ArgumentParser::prog(string prog_name) const {
+  impl->prog = prog_name;
+  impl->prog_super_parser = {};
   return *this;
 }
 
-ArgumentParser &ArgumentParser::description(string s) {
-  impl_->description = std::move(s);
+ArgumentParser ArgumentParser::prog_as_subparser(ArgumentParser const &super_parser, string prog_name) const {
+  impl->prog = prog_name;
+  impl->prog_super_parser = super_parser.impl;
   return *this;
 }
 
-ArgumentParser &ArgumentParser::epilog(string s) {
-  impl_->epilog = std::move(s);
+ArgumentParser ArgumentParser::description(string s) const {
+  impl->description = std::move(s);
   return *this;
 }
 
-ArgumentParser &ArgumentParser::usage(string s) {
-  impl_->usage = std::move(s);
+ArgumentParser ArgumentParser::epilog(string s) const {
+  impl->epilog = std::move(s);
   return *this;
 }
 
-ArgumentParser &ArgumentParser::prefix_chars(string value) {
+ArgumentParser ArgumentParser::usage(string s) const {
+  impl->usage = std::move(s);
+  return *this;
+}
+
+ArgumentParser ArgumentParser::prefix_chars(string value) const {
   if (value.empty())
     throw std::logic_error("prefix chars must be non-empty");
-  impl_->prefix_chars = std::move(value);
-  if (impl_->prefix_chars.find('-') != string::npos)
-    impl_->default_prefix = '-';
+  impl->prefix_chars = std::move(value);
+  if (impl->prefix_chars.find('-') != string::npos)
+    impl->default_prefix = '-';
   else
-    impl_->default_prefix = impl_->prefix_chars[0];
+    impl->default_prefix = impl->prefix_chars[0];
   return *this;
 }
-
-
-
-Subparsers &Subparsers::help(string help) {
-  set_help(*impl_, std::move(help));
-  return *this;
-}
-
-Subparsers &Subparsers::hide() {
-  set_help(*impl_, {});
-  return *this;
-}
-
-Subparsers &Subparsers::metavar(OptionsSpec value) {
-  set_metavar(*impl_, std::move(value));
-  return *this;
-}
-ArgumentParser Subparsers::add_parser(OptionsSpec names, string short_desc) {
-  return add_parser(std::move(names), optional<string>{std::move(short_desc)});
-}
-
-
-ArgumentParser Subparsers::add_parser(OptionsSpec names, optional<string> short_desc) {
-  ArgumentParser parser;
-
-  size_t index = impl_->parsers.size();
-  impl_->parsers.emplace_back();
-  auto &entry = impl_->parsers.back();
-  entry.parser = parser;
-  entry.names = std::move(names.spec);
-  entry.short_desc = std::move(short_desc);
-  if (entry.names.empty())
-    throw std::logic_error("At least one name must be specified");
-
-  for (auto const &name : entry.names) {
-    if (!impl_->parser_map.emplace(name, index).second)
-      throw std::logic_error("Duplicate parser name: " + name);
-  }
-
-  return parser;
-}
-
 
 
 
@@ -1570,7 +1451,7 @@ public:
 
   void print_usage(std::ostream &os,
                    optional<string> const &usage_str,
-                   vector<detail::ArgumentImpl const *> const &actions,
+                   vector<GenericArgument const *> const &actions,
                    optional<string> prefix) {
 
     // suppressed
@@ -1587,7 +1468,7 @@ public:
     } else if (!usage_str && actions.empty()) {
       usage = *prefix + prog;
     } else {
-      vector<detail::ArgumentImpl const *> optionals, positionals;
+      vector<GenericArgument const *> optionals, positionals;
       for (auto a : actions) {
         if (a->is_positional())
           positionals.push_back(a);
@@ -1595,7 +1476,7 @@ public:
           optionals.push_back(a);
       }
 
-      vector<detail::ArgumentImpl const *> all_actions = optionals;
+      vector<GenericArgument const *> all_actions = optionals;
       all_actions.insert(all_actions.end(), positionals.begin(), positionals.end());
 
       // Sort all option arguments before positional arguments
@@ -1609,7 +1490,7 @@ public:
 
       // single-line usage for optionals and positionals
       string action_usage =
-          join_if(" ", all_usage, [](auto const & x)->decltype(auto) { return x; }, [](auto const &x) { return !x.empty(); });
+        join(" ", all_usage, identity{}, [](auto const &x) { return !x.empty(); });
 
       if (!usage.empty() && !action_usage.empty()) {
         usage += ' ';
@@ -1684,22 +1565,17 @@ public:
     os << usage << '\n';
   }
 
-  string format_metavar(detail::ArgumentImpl const *action, size_t i) {
-    if (auto subimpl = dynamic_cast<detail::SubparsersArgumentImpl const *>(action)) {
-      if (!subimpl->metavar.empty())
-        return subimpl->metavar[0];
-      return '{' + join(",", subimpl->parsers, [](auto const &p) { return p.names[0]; }) + '}';
-    }
+  string format_metavar(GenericArgument const *action, size_t i) {
     return action->format_metavar(i);
   }
 
-  string _format_args(detail::ArgumentImpl const *action, bool force_required = false) {
+  string _format_args(GenericArgument const *action, bool force_required = false) {
 
     auto nargs = action->nargs;
     if (force_required) {
       switch (nargs) {
       case OPTIONAL:
-        nargs = Nargs(1);
+        nargs = NargsValue(1);
         break;
       case ZERO_OR_MORE:
         nargs = ONE_OR_MORE;
@@ -1754,7 +1630,7 @@ public:
     return result;
   }
 
-  string format_action_invocation(detail::ArgumentImpl const *action) {
+  string format_action_invocation(GenericArgument const *action) {
     // For positionals, just print the first metavar
     if (action->is_positional())
       return format_metavar(action, 0);
@@ -1770,7 +1646,7 @@ public:
   }
 
   // Update action max length to take into account \p action
-  void update_action_max_length(detail::ArgumentImpl const *action) {
+  void update_action_max_length(GenericArgument const *action) {
     if (action->is_help_suppressed())
       return;
 
@@ -1778,25 +1654,23 @@ public:
     action_max_length = std::max(action_max_length,
                                  int(format_action_invocation(action).size()) + indent_increment);
 
-    if (auto sub_act = dynamic_cast<detail::SubparsersArgumentImpl const *>(action)) {
-      for (auto const &p : sub_act->parsers) {
-        if (p.short_desc) {
-          auto s = p.format_invocation();
-          size_t len = s.size() + indent_increment * 2;
-          action_max_length = std::max(action_max_length, int(len));
-        }
+    for (auto const &choice : action->choice_help) {
+      if (choice.help) {
+        auto const &s = choice.invocation;
+        size_t len = s.size() + indent_increment * 2;
+        action_max_length = std::max(action_max_length, int(len));
       }
     }
   }
 
-  vector<string> _format_actions_usage(vector<detail::ArgumentImpl const *> const &actions) {
+  vector<string> _format_actions_usage(vector<GenericArgument const *> const &actions) {
     vector<string> result;
 
     // map from mutex group to number of non-suppressed actions
     // only groups with at least one non-suppressed action will be present, so 0 is never valid
     std::unordered_map<MutuallyExclusiveGroup::Impl *,size_t> mutex_group_shown_count;
 
-    auto get_part = [&](detail::ArgumentImpl const *action, bool in_mutex_group) {
+    auto get_part = [&](GenericArgument const *action, bool in_mutex_group) {
       if (action->is_positional()) {
         return _format_args(action,in_mutex_group /* shown as "required" if in mutex group */);
       } else {
@@ -1848,10 +1722,10 @@ public:
 
           bool force_required = (total_count > 1 || mutex_group->required);
 
-          string s = join_if(" | ",
-                             simple_range<detail::ArgumentImpl const * const *>(&actions[action_i], &actions[end_action_i]),
-                             [&](auto a) { return get_part(a, force_required); },
-                             [&](auto a) { return !a->is_help_suppressed(); });
+          string s = join(" | ",
+                          simple_range<GenericArgument const * const *>(&actions[action_i], &actions[end_action_i]),
+                          [&](auto a) { return get_part(a, force_required); },
+                          [&](auto a) { return !a->is_help_suppressed(); });
           if (total_count > 1) {
             if (mutex_group->required)
               s = "(" + s + ")";
@@ -1901,138 +1775,249 @@ public:
     }
   }
 
-  void print_action(std::ostream &os, detail::ArgumentImpl const *action) {
+  void print_action(std::ostream &os, GenericArgument const *action) {
 
     if (action->is_help_suppressed())
       return;
 
     auto action_header = format_action_invocation(action);
     print_action_str(os, action_header, *action->help);
+    // FIXME: expand help
 
-    if (auto sub_act = dynamic_cast<detail::SubparsersArgumentImpl const *>(action)) {
-      string extra_indent(indent_increment, ' ');
-      for (auto const &p : sub_act->parsers) {
-        if (p.short_desc) {
-          print_action_str(os, extra_indent + p.format_invocation(), *p.short_desc);
-        }
+    for (auto const &choice : action->choice_help) {
+      if (choice.help) {
+        string extra_indent(indent_increment, ' ');
+        print_action_str(os, extra_indent + choice.invocation, *choice.help);
       }
     }
-
-    // FIXME: expand help
   }
 };
 
-void ArgumentParser::print_usage(std::ostream &os, int width) const {
-
-  HelpFormatterParameters params;
-  params.width = width;
-  params.prog = impl_->prog;
-  HelpFormatter formatter(params);
-
-  vector<detail::ArgumentImpl const *> actions;
-  for (auto const &a : impl_->actions)
-    actions.push_back(a.get());
-
-  formatter.print_usage(formatter.os, impl_->usage, actions, {});
-  os << formatter.trim();
+void ArgumentParser::print_usage(std::ostream &os, HelpFormatterParameters const &params) const {
+  os << usage_string(params);
 }
 
 
-void ArgumentParser::print_help(std::ostream &os, int width) const {
-  propagate_prog_name(impl_.get());
+void ArgumentParser::print_help(std::ostream &os, HelpFormatterParameters const &params) const {
+  os << help_string(params);
+}
 
-  HelpFormatterParameters params;
-  params.prog = impl_->prog;
-  params.width = width;
+string ArgumentParser::help_string(HelpFormatterParameters const &params_in) const {
+  auto params = params_in;
+  if (params.prog.empty())
+    params.prog = impl->get_prog();
+
   HelpFormatter formatter(params);
 
-  vector<detail::ArgumentImpl const *> actions;
-  for (auto const &a : impl_->actions) {
+  vector<GenericArgument const *> actions;
+  for (auto const &a : impl->actions) {
     formatter.update_action_max_length(a.get());
     actions.push_back(a.get());
   }
 
-  formatter.print_usage(formatter.os, impl_->usage, actions, {});
+  formatter.print_usage(formatter.os, impl->usage, actions, {});
 
-  formatter.print_text(formatter.os, impl_->description);
+  formatter.print_text(formatter.os, impl->description);
 
-  auto do_group = [&] (ArgumentGroup::Impl const *group) {
-    HelpFormatter::Section section(formatter, formatter.os, group->title);
-    formatter.print_text(section, group->description);
-    for (auto action : group->actions)
+  for (auto const &group : impl->groups) {
+    HelpFormatter::Section section(formatter, formatter.os, group.impl->title);
+    formatter.print_text(section, group.impl->description);
+    for (auto action : group.impl->actions)
       formatter.print_action(section, action);
-  };
-
-  do_group(&impl_->positional_group);
-  do_group(&impl_->optional_group);
-  for (auto const &group : impl_->groups) {
-    do_group(group.get());
   }
 
-  formatter.print_text(formatter.os, impl_->epilog);
+  formatter.print_text(formatter.os, impl->epilog);
 
-  os << formatter.trim();
+  return formatter.trim();
 }
 
-string ArgumentParser::help_string(int width) const {
-  std::ostringstream ostr;
-  print_help(ostr, width);
-  return ostr.str();
+string ArgumentParser::usage_string(HelpFormatterParameters const &params_in) const {
+  auto params = params_in;
+  if (params.prog.empty())
+    params.prog = impl->get_prog();
+  HelpFormatter formatter(params);
+
+  vector<GenericArgument const *> actions;
+  for (auto const &a : impl->actions)
+    actions.push_back(a.get());
+
+  formatter.print_usage(formatter.os, impl->usage, actions, {});
+  return formatter.trim();
 }
 
-string ArgumentParser::usage_string(int width) const {
-  std::ostringstream ostr;
-  print_usage(ostr, width);
-  return ostr.str();
-}
+ArgumentParser ArgumentParser::parent(ArgumentParser const &parent) const {
+  if (parent.impl->has_negative_number_options)
+    impl->has_negative_number_options = true;
 
-namespace detail {
-void ArgumentParserImpl::copy_from(ArgumentParserImpl *parent) {
-  if (parent->has_negative_number_options)
-    has_negative_number_options = true;
+  std::unordered_map<ArgumentGroup::Impl const *,shared_ptr<ArgumentGroup::Impl>> group_map;
+  std::unordered_map<MutuallyExclusiveGroup::Impl const *,shared_ptr<MutuallyExclusiveGroup::Impl>> mutex_group_map;
 
-  std::unordered_map<ArgumentGroup::Impl *,ArgumentGroup::Impl *> group_map;
-  std::unordered_map<MutuallyExclusiveGroup::Impl *,MutuallyExclusiveGroup::Impl *> mutex_group_map;
 
-  group_map[&parent->positional_group] = &this->positional_group;
-  group_map[&parent->optional_group] = &this->optional_group;
-  group_map[nullptr] = nullptr;
+  group_map[parent.impl->positional_group.impl.get()] = impl->positional_group.impl;
+  group_map[parent.impl->optional_group.impl.get()] = impl->optional_group.impl;
 
-  for (auto const &group : parent->groups) {
-    auto x = group->clone();
-    x->parent = this;
-    group_map[group.get()] = x.get();
-    this->groups.push_back(std::move(x));
+  for (auto const &group : parent.impl->groups) {
+    if (group_map.count(group.impl.get()))
+      continue;
+    auto x = group.impl->clone();
+    x->parser = impl;
+    group_map[group.impl.get()] = x;
+    impl->groups.push_back(std::move(x));
   }
 
-  for (auto const &mutex_group : parent->mutex_groups) {
+  for (auto const &mutex_group : parent.impl->mutex_groups) {
     auto x = mutex_group->clone();
-    x->parent = this;
-    x->parent_group = group_map[mutex_group->parent_group];
-    mutex_group_map[mutex_group.get()] = x.get();
-    this->mutex_groups.push_back(std::move(x));
+    x->parser = impl;
+    mutex_group_map[mutex_group.get()] = x;
+    impl->mutex_groups.push_back(std::move(x));
   }
 
-  for (auto const &action : parent->actions) {
-    auto x = action->clone();
-    register_option_strings(this, x.get());
+  for (auto const &action : parent.impl->actions) {
+    auto x = action->clone_for(*this);
+
+    shared_ptr<ArgumentGroup::Impl> group;
+    if (auto g = action->group.lock())
+      group = group_map.at(g.get());
+
     if (action->mutex_group)
-      mutex_group_map.at(action->mutex_group)->register_argument_impl(x.get());
-    else if (action->group)
-      group_map.at(action->group)->register_argument_impl(x.get());
+      register_argument(*x, mutex_group_map.at(action->mutex_group), group);
+    else if (group)
+      register_argument(*x, group);
     else
-      register_argument_impl(x.get());
-    actions.push_back(std::move(x));
+      register_argument(*x, impl);
+
+
+    register_option_strings(impl, *x);
+    impl->actions.push_back(std::move(x));
   }
-}
-}
-
-
-ArgumentParser &ArgumentParser::parent(ArgumentParser const &parent) {
-  impl_->copy_from(parent.impl_.get());
   return *this;
 }
 
 
+
+
+/**
+ * Subparser support
+ **/
+
+namespace detail {
+struct SubparserEntry {
+  ArgumentParser parser;
+  vector<string> names;
+
+  string format_invocation() const {
+    string s = names.front();
+    if (names.size() > 1) {
+      s += " (";
+      for (size_t i = 1; i < names.size(); ++i) {
+        if (i > 1)
+          s += ", ";
+        s += names[i];
+      }
+      s += ')';
+    }
+    return s;
+  }
+};
+
+struct SubparsersHandler {
+  GenericArgument &arg;
+  SubparsersHandler(GenericArgument &arg)
+    : arg(arg)
+  {}
+
+  vector<SubparserEntry> parsers;
+  std::unordered_map<string_view,size_t> parser_map;
+
+  void operator()(ArgumentParser const &, Result &result, string const &dest, vector<string_view> values) const {
+    auto command = values.at(0);
+
+    if (auto entry_num = find_ptr(parser_map, command)) {
+      auto const &e = parsers[*entry_num];
+      values.erase(values.begin());
+      e.parser.try_parse(result, values);
+    } else {
+      string command_metavar = arg.format_metavar(0);
+      if (command_metavar.empty())
+        command_metavar = "command";
+      throw std::invalid_argument("unknown " + command_metavar + " " + repr(command));
+    }
+
+    if (!dest.empty())
+      result[dest] = string(command);
+  }
+};
+
+Handler copy_subparsers_handler(GenericArgument &arg, Handler const &handler_func) {
+  auto handler = handler_func.target<detail::SubparsersHandler>();
+  if (!handler)
+    throw std::logic_error("Internal error: corrupted subparsers");
+
+  SubparsersHandler new_handler(arg);
+  new_handler.parser_map = handler->parser_map;
+  for (auto const &parser : handler->parsers) {
+    new_handler.parsers.emplace_back();
+    auto &new_parser = new_handler.parsers.back();
+    new_parser.names = parser.names;
+    new_parser.parser = parser.parser.clone();
+    if (auto super_parser = parser.parser.impl->prog_super_parser.lock())
+      new_parser.parser.impl->prog_super_parser = get_parser(arg).impl;
+  }
+  return std::move(new_handler);
 }
 }
+
+Subparsers ArgumentContainer::add_subparsers(OptionsSpec spec) const {
+  if (spec.empty())
+    spec.push_back(string() /* empty dest */);
+  auto generic = add_generic(std::move(spec));
+  set_nargs(*generic, PARSER);
+  set_handler(*generic, detail::SubparsersHandler(*generic), &detail::copy_subparsers_handler);
+  return Subparsers(std::move(generic));
+}
+
+Subparsers Subparsers::help(string help) const {
+  set_help(*generic, std::move(help));
+  return *this;
+}
+
+Subparsers Subparsers::hide() const {
+  set_help(*generic, {});
+  return *this;
+}
+
+Subparsers Subparsers::metavar(OptionsSpec value) const {
+  set_metavar(*generic, std::move(value));
+  return *this;
+}
+
+ArgumentParser Subparsers::add_parser(OptionsSpec names, OptionalString short_desc) const {
+
+  auto handler = get_handler(*generic).target<detail::SubparsersHandler>();
+  if (!handler)
+    throw std::logic_error("Internal error: corrupted subparsers");
+
+  size_t index = handler->parsers.size();
+  handler->parsers.emplace_back();
+  auto &entry = handler->parsers.back();
+  entry.parser = make_parser();
+
+  entry.names = std::move(names);
+  if (entry.names.empty())
+    throw std::logic_error("At least one name must be specified");
+
+  entry.parser.prog_as_subparser(get_parser(*generic), entry.names.front());
+
+  for (auto const &name : entry.names) {
+    if (!handler->parser_map.emplace(name, index).second)
+      throw std::logic_error("Duplicate parser name: " + name);
+  }
+
+  add_choice_help(*generic, entry.names.front(), entry.format_invocation(), short_desc);
+
+  return entry.parser;
+}
+
+
+} // namespace jbms::argparse
+} // namespace jbms

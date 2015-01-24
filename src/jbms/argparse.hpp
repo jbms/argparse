@@ -39,7 +39,9 @@ using boost::any;
 using boost::any_cast;
 #endif
 
-enum Nargs : int {
+using std::shared_ptr;
+
+enum NargsValue : int {
   OPTIONAL = -1,
   ZERO_OR_MORE = -2,
   ONE_OR_MORE = -3,
@@ -48,9 +50,30 @@ enum Nargs : int {
   NARGS_INVALID = -6,
 };
 
+struct Nargs {
+  NargsValue value;
+  operator NargsValue () const { return value; }
+
+  Nargs(NargsValue value) : value(value) {}
+  Nargs(int count) : value(NargsValue(count)) {
+    if (count < 0)
+      throw std::invalid_argument("Explicit number of arguments must be positive");
+  }
+};
+
+
+/**
+ * Returns a representation of a string in string literal syntax
+ **/
+string repr(string_view s);
+
 class ArgumentParser;
 class ArgumentGroup;
 class MutuallyExclusiveGroup;
+class Subparsers;
+class ArgumentContainer;
+
+class GenericArgument;
 
 template <class Value>
 class Argument;
@@ -77,90 +100,114 @@ public:
 };
 
 
-class OptionsSpec {
+class OptionalString : public optional<string> {
 public:
-  std::vector<std::string> spec;
-
-  OptionsSpec(const char *x) : spec{ std::string(x) } {}
-  OptionsSpec(std::string x) : spec{ std::move(x) } {}
-  OptionsSpec(string_view x) : spec{ std::string(x) } {}
-  OptionsSpec(std::initializer_list<std::string> x) : spec(x) {}
-  OptionsSpec(std::vector<std::string> x) : spec(x) {}
+  using optional<string>::optional;
+  OptionalString() = default;
+  OptionalString(string_view s)
+    : optional<string>(string(s))
+  {}
+  OptionalString(const char *s)
+    : optional<string>(string(s))
+  {}
 };
 
 
-namespace detail {
+/**
+ * \brief Specifies a list of strings.
+ *
+ * This can be implicitly constructed from either a single string or a list of strings.
+ **/
+class OptionsSpec : public vector<string> {
+public:
+  OptionsSpec() = default;
+  OptionsSpec(const char *x) : vector<string>{ std::string(x) } {}
+  OptionsSpec(std::string x) : vector<string>{ std::move(x) } {}
+  OptionsSpec(string_view x) : vector<string>{ std::string(x) } {}
+  OptionsSpec(std::initializer_list<std::string> x) : vector<string>(x) {}
+  OptionsSpec(std::vector<std::string> x) : vector<string>(x) {}
+  OptionsSpec(OptionalString x) {
+    if (x)
+      push_back(*x);
+  }
+};
 
-class ArgumentImpl;
-class SubparsersArgumentImpl;
 
+/**
+ * \param help If equal to nullopt, then the argument is suppressed from the help and usage messages.  In contrast, an empty string will result in the argument being displayed without a help message.
+ **/
+void set_help(GenericArgument &arg, OptionalString help);
+void set_nargs(GenericArgument &arg, Nargs nargs);
+void set_required(GenericArgument &arg, bool value);
+void set_default_value(GenericArgument &arg, any value);
+
+/**
+ * Handlers receive the entire result map as a parameter for greater generality.
+ * In most cases a handler will only update result[dest].  Subparsers will update multiple fields, however.
+ **/
 using Handler = std::function<void (ArgumentParser const &parser,
                                     Result &result,
                                     string const &dest,
                                     vector<string_view> values)>;
 
+using CopyHandler = std::function<Handler (GenericArgument &arg, Handler const &handler)>;
 
-void set_help(ArgumentImpl &impl, optional<std::string> help);
-void set_nargs(ArgumentImpl &impl, Nargs nargs);
-void set_required(ArgumentImpl &impl, bool value);
-void set_default_value(ArgumentImpl &impl, any value);
+/**
+ * Specifies the handler, along with a function to copy it if the argument is cloned (rather than just using the copy constructor).
+ *
+ * This is useful if the handler contains a reference to the underlying ArgumentParser.
+ **/
+// If no copy_handler is specified, the handler will just be copy-constructed
+void set_handler(GenericArgument &arg, Handler handler, CopyHandler copy_handler = {});
+Handler &get_handler(GenericArgument &arg);
 
-void set_handler(ArgumentImpl &impl, Handler handler);
+void set_metavar(GenericArgument &arg, OptionsSpec value);
 
-void set_metavar(ArgumentImpl &impl_, OptionsSpec value);
+/**
+ * \brief Specifies a logical sub-command to be shown in the help message.
+**/
+void add_choice_help(GenericArgument &arg, string name, string invocation, OptionalString help = {});
 
-// void set_metavar(ArgumentImpl &impl_, std::vector<std::string> value);
+string const &get_dest(GenericArgument &arg);
+
+ArgumentParser get_parser(GenericArgument &arg);
+ArgumentGroup get_group(GenericArgument &arg);
 
 
-class ArgumentBase {
-protected:
-  ArgumentImpl *impl_ = nullptr;
-  std::string dest_;
-
-  template <class Value>
-  friend class Argument;
-
+template <class Value = void>
+class Argument {
+  shared_ptr<GenericArgument> generic;
 public:
-  string const &dest() const { return dest_; }
+  Argument(shared_ptr<GenericArgument> generic) : generic(generic)
+  {}
 
-  ArgumentBase() = default;
-  ArgumentBase(ArgumentImpl *impl_);
-};
+  string const &dest() const{ return get_dest(*generic); }
 
-}
-
-template <class Value>
-class Argument : public detail::ArgumentBase {
-public:
-  Argument() = default;
-  Argument(detail::ArgumentImpl *impl) : detail::ArgumentBase(impl) {}
-
-
-  Argument &help(std::string help) {
-    set_help(*impl_, std::move(help));
+  Argument help(std::string help) const {
+    set_help(*generic, std::move(help));
     return *this;
   }
 
-  Argument &hide() {
-    set_help(*impl_, {});
+  Argument hide() const {
+    set_help(*generic, {});
     return *this;
   }
 
   // Only instantiate when called.
   // This is invalid for Value == void
   template <class ValueT = Value>
-  Argument &default_value(std::common_type_t<ValueT> const &value) {
-    set_default_value(*impl_, value);
+  Argument default_value(std::common_type_t<ValueT> value) const {
+    set_default_value(*generic, std::move(value));
     return *this;
   }
 
-  Argument &required(bool value) {
-    set_required(*impl_, value);
+  Argument required(bool value) const {
+    set_required(*generic, value);
     return *this;
   }
 
-  Argument &metavar(OptionsSpec value) {
-    set_metavar(*impl_, std::move(value));
+  Argument metavar(OptionsSpec value) const {
+    set_metavar(*generic, std::move(value));
     return *this;
   }
 };
@@ -193,140 +240,300 @@ T lexical_cast(string_view s) {
 
 }
 
+template <class T>
+T default_single_converter(string_view s) {
+  return detail::lexical_cast<detail::remove_optional_t<T>>(s);
+}
+
+template <class T>
+vector<T> default_multi_converter(vector<string_view> const &s) {
+  vector<T> result;
+  for (auto x : s)
+    result.push_back(default_single_converter<T>(x));
+  return result;
+}
+
+template <class T>
+class SingleConverter {
+public:
+  using value_type = T;
+  std::function<T (string_view s)> convert;
+  OptionalString metavar;
+
+  /**
+   * Default converter
+   **/
+  SingleConverter() : convert(&default_single_converter<T>) {}
+
+  /**
+   * Construct from a conversion function
+   **/
+  SingleConverter(std::function<T (string_view)> convert,
+                  OptionalString metavar = {})
+    : convert(std::move(convert)), metavar(std::move(metavar))
+  {}
+
+  /**
+   * Construct from a list of choices
+   **/
+  SingleConverter(vector<T> choices,
+                  SingleConverter<T> convert = {}) {
+    std::ostringstream ostr;
+    ostr << "{";
+    bool is_first = true;
+    for (auto const &x : choices) {
+      if (!is_first)
+        ostr << ",";
+      is_first = false;
+      ostr << x;
+    }
+    ostr << "}";
+    this->metavar = ostr.str();
+
+    this->convert = [choices = std::move(choices), convert = std::move(convert)](string_view s) {
+      auto value = convert.convert(s);
+      for (auto const &x : choices) {
+        if (x == value)
+          return value;
+      }
+      std::ostringstream ostr;
+      ostr << "invalid choice: " << repr(s) << " (choose from ";
+      bool is_first = true;
+      for (auto const &x : choices) {
+        if (!is_first)
+          ostr << ", ";
+        is_first = false;
+        ostr << x;
+      }
+      ostr << ")";
+      throw std::invalid_argument(ostr.str());
+    };
+  }
+
+  /**
+   * Construct from a list of choices (specified as initializer_list).
+   *
+   * This overload is needed so that an argument of type SingleConstructor can be implicitly constructed from an initializer list.
+   **/
+  SingleConverter(std::initializer_list<T> choices,
+                  SingleConverter<T> convert = {})
+    : SingleConverter(vector<T>(choices.begin(), choices.end()), std::move(convert))
+  {}
+};
+
+
+template <class F>
+auto convert_all_arguments(F conv) {
+  using T = std::decay_t<decltype(conv(std::declval<string_view>()))>;
+  return [conv = std::move(conv)](vector<string_view> const & s) -> vector<T> {
+    vector<T> result;
+    for (auto x : s)
+      result.push_back(conv(x));
+    return result;
+  };
+}
+
+/**
+ * \brief Generic MultiConverter for non-vector result types
+ *
+ * There is no default conversion function for this case.
+ **/
+template <class T>
+class MultiConverter {
+public:
+  using value_type = T;
+  using Convert = std::function<value_type (vector<string_view> const &)>;
+  Convert convert;
+  OptionsSpec metavar;
+
+  /**
+   * Construct from a conversion function
+   **/
+  MultiConverter(Convert convert,
+                 OptionsSpec metavar = {})
+    : convert(std::move(convert)), metavar(std::move(metavar))
+  {}
+};
+
+/**
+ * \brief MultiConverter specialization for vector<Element> case
+ *
+ * We can automatically generate a conversion using a SingleConverter<Element>, by just converting each element.
+ **/
+template <class Element>
+class MultiConverter<vector<Element>> {
+public:
+  using value_type = vector<Element>;
+  using element_type = Element;
+  using Convert = std::function<value_type (vector<string_view> const &)>;
+  Convert convert;
+  OptionsSpec metavar;
+
+  /**
+   * \brief Default converter using boost::lexical_cast for each element
+   **/
+  MultiConverter() : convert(&default_multi_converter<element_type>) {}
+
+  /**
+   * Construct from a conversion function
+   **/
+  MultiConverter(Convert convert,
+                 OptionsSpec metavar = {})
+    : convert(std::move(convert)), metavar(std::move(metavar))
+  {}
+
+  /**
+   * Construct from a SingleConverter
+   **/
+  MultiConverter(SingleConverter<element_type> convert)
+    : convert(convert_all_arguments(std::move(convert.convert))),
+      metavar(std::move(convert.metavar))
+  {}
+
+  /**
+   * Construct from a single conversion function
+   **/
+  MultiConverter(std::function<element_type (string_view)> convert,
+                 OptionalString metavar = {})
+    : MultiConverter(SingleConverter<element_type>(std::move(convert), std::move(metavar)))
+  {}
+
+  /**
+   * Construct from element choices
+   **/
+  MultiConverter(vector<element_type> choices,
+                 SingleConverter<element_type> convert = {})
+    : MultiConverter(SingleConverter<element_type>(std::move(choices), std::move(convert)))
+  {}
+
+  /**
+   * Construct from element choices (initializer list)
+   **/
+  MultiConverter(std::initializer_list<element_type> choices,
+                 SingleConverter<element_type> convert = {})
+    : MultiConverter(SingleConverter<element_type>(choices, std::move(convert)))
+  {}
+
+};
+
 namespace action {
 
-
-template <class T>
-struct store_single {
-  using value_type = T;
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, Nargs(1));
-  }
-
-  void operator()(ArgumentParser const &, Result &result, string const &dest, vector<string_view> values) const {
-    result[dest] = detail::lexical_cast<T>(std::move(values[0]));
-  }
-};
+template <class T = string>
+Argument<T> store_single(shared_ptr<GenericArgument> generic, SingleConverter<T> convert = {}) {
+  set_nargs(*generic, 1);
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(*generic,
+              [conv = std::move(convert.convert)](ArgumentParser const &, Result &result, string const &dest, vector<string_view> const & values) {
+    assert(values.size() == 1);
+    result[dest] = conv(values.at(0));
+  });
+  return Argument<T>(std::move(generic));
+}
 
 
-template <class T>
-struct store_optional {
-  using value_type = T;
+template <class Value = optional<string>>
+Argument<Value> store_optional(shared_ptr<GenericArgument> generic, Value missing_value = {}, SingleConverter<Value> convert = {}) {
+  set_nargs(*generic, OPTIONAL);
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(
+      *generic,
+      [ conv = std::move(convert.convert), missing_value = std::move(missing_value) ](ArgumentParser const &,
+                                                                                      Result &result,
+                                                                                      string const &dest,
+                                                                                      vector<string_view> const & values) {
+        auto &a = result[dest];
+        if (values.empty())
+          a = missing_value;
+        else {
+          assert(values.size() == 1);
+          a = conv(values.at(0));
+        }
+      });
+  return Argument<Value>(std::move(generic));
+}
 
-  value_type missing_value;
+template <class T = vector<string>>
+Argument<T> store_multi(shared_ptr<GenericArgument> generic, Nargs nargs, MultiConverter<T> convert = {}) {
+  set_nargs(*generic, nargs);
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(*generic,
+              [conv = std::move(convert.convert)](
+                  ArgumentParser const &, Result & result, string const & dest, vector<string_view> const & values) {
+    result[dest] = conv(values);
+  });
+  return Argument<T>(std::move(generic));
+}
 
-  store_optional(value_type missing_value)
-    : missing_value(std::move(missing_value)) {}
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, OPTIONAL);
-  }
-
-  void operator()(ArgumentParser const &, Result &result, std::string const &dest, std::vector<string_view> values) const {
-    if (values.empty())
-      result[dest] = missing_value;
-    else
-      result[dest] = value_type(detail::lexical_cast<detail::remove_optional_t<T>>(std::move(values[0])));
-  }
-};
-
-
-template <class T>
-struct store_multi {
-  using value_type = std::vector<T>;
-  Nargs nargs;
-  store_multi(Nargs nargs)
-    : nargs(nargs) {}
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, nargs);
-  }
-
-  void operator()(ArgumentParser const &, Result &result, std::string const &dest, vector<string_view> values) const {
-    std::vector<T> x;
-    for (auto &v : values) {
-      x.push_back(detail::lexical_cast<T>(std::move(v)));
-    }
-    result[dest] = x;
-  }
-};
-
-template <class T>
-struct store_flag {
-  using value_type = T;
-  value_type value;
-
-  store_flag(value_type const &value) : value(value) {}
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, Nargs(0));
-  }
-
-  void operator()(ArgumentParser const &, Result &result, std::string const &dest, vector<string_view> values) const {
+template <class T = bool>
+auto store_flag(shared_ptr<GenericArgument> generic, T value) {
+  set_nargs(*generic, 0);
+  set_handler(*generic,
+              [value = std::move(value)](
+                  ArgumentParser const &, Result & result, string const & dest, vector<string_view> const & values) {
+    assert(values.size() == 0);
     (void)values;
     result[dest] = value;
-  }
-};
+  });
+  return Argument<T>(std::move(generic));
+}
+
+template <class T = string>
+Argument<vector<T>> append(shared_ptr<GenericArgument> generic, SingleConverter<T> convert = {}) {
+  using Value = vector<T>;
+
+  set_nargs(*generic, 1);
+  set_default_value(*generic, Value());
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(*generic,
+              [conv = std::move(convert.convert)](
+                  ArgumentParser const &, Result & result, string const & dest, vector<string_view> const & values) {
+    assert(values.size() == 1);
+    any_cast<Value &>(result[dest]).emplace_back(conv(values.at(0)));
+  });
+  return Argument<Value>(std::move(generic));
+}
 
 template <class T>
-struct append {
-  using value_type = std::vector<T>;
+Argument<vector<T>> append_flag(shared_ptr<GenericArgument> generic, T value) {
+  using Value = std::vector<T>;
 
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, Nargs(1));
-    set_default_value(impl, value_type{});
-  }
-
-  void operator()(ArgumentParser const &, Result &result, string const &dest, vector<string_view> values) const {
-    any_cast<value_type &>(result[dest]).push_back(detail::lexical_cast<T>(values[0]));
-  }
-};
-
-template <class T>
-struct append_flag {
-  using value_type = std::vector<T>;
-  T value;
-
-  append_flag(T const &value) : value(value) {}
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, Nargs(0));
-    set_default_value(impl, value_type{});
-  }
-
-  void operator()(ArgumentParser const &, Result &result, string const &dest, vector<string_view> values) const {
+  set_nargs(*generic, 0);
+  set_default_value(*generic, Value());
+  set_handler(*generic, [value = std::move(value)](ArgumentParser const &, Result &result, string const &dest, vector<string_view> const & values) {
+    assert(values.size() == 0);
     (void)values;
-    any_cast<value_type &>(result[dest]).push_back(value);
-  }
-};
+    any_cast<Value &>(result[dest]).emplace_back(value);
+  });
+  return Argument<Value>(std::move(generic));
+}
 
-
-template <class T>
-struct count_action {
-  using value_type = T;
-
-  void initialize(detail::ArgumentImpl &impl) const {
-    set_nargs(impl, Nargs(0));
-    set_default_value(impl, value_type{});
-  }
-
-  void operator()(ArgumentParser const &, Result &result, std::string const &dest, vector<string_view> values) const {
+template <class Value = size_t>
+Argument<Value> count(shared_ptr<GenericArgument> generic) {
+  set_nargs(*generic, 0);
+  set_default_value(*generic, Value());
+  set_handler(*generic, [](ArgumentParser const &, Result &result, string const &dest, vector<string_view> const &values) {
+    assert(values.size() == 0);
     (void)values;
-    auto &x = result[dest];
-    any_cast<value_type &>(x) += value_type(1);
-  }
-};
+    any_cast<Value &>(result[dest]) += Value(1);
+  });
+  return Argument<Value>(std::move(generic));
+}
 
 }
 
-namespace detail {
-class ArgumentContainer;
-class ArgumentParserImpl;
-}
+struct HelpFormatterParameters {
+  HelpFormatterParameters() = default;
+  HelpFormatterParameters(int width) : width(width) {}
+  string prog;
+  int indent_increment = 2;
+  int max_help_position = 24;
+  int width = 0;
+  int min_text_width = 11;
+};
+
+
 
 class Subparsers {
-  friend class detail::ArgumentContainer;
 public:
 
   Subparsers() = default;
@@ -334,116 +541,101 @@ public:
   /**
    * \param short_desc  Short description text to show in help message.  The parser will not be listed if nullopt is specified.
    **/
-  ArgumentParser add_parser(OptionsSpec names, optional<string> short_desc = {});
-  ArgumentParser add_parser(OptionsSpec names, string short_desc);
+  ArgumentParser add_parser(OptionsSpec names, OptionalString short_desc = {}) const;
 
-  Subparsers &help(string help);
-  Subparsers &hide();
-  Subparsers &metavar(OptionsSpec value);
+  Subparsers help(string help) const;
+  Subparsers hide() const;
+  Subparsers metavar(OptionsSpec value) const;
 
 private:
-  Subparsers(detail::SubparsersArgumentImpl *impl) : impl_(impl) {}
-  detail::SubparsersArgumentImpl *impl_ = nullptr;
+  shared_ptr<GenericArgument> generic;
+  Subparsers(shared_ptr<GenericArgument> generic) : generic(std::move(generic)) {}
+  friend class ArgumentContainer;
 };
 
 
-
-namespace detail {
-
 class ArgumentContainer {
-private:
-  detail::ArgumentImpl &make_argument_impl(OptionsSpec spec);
 public:
-  // for internal use only
-  virtual void register_argument_impl(detail::ArgumentImpl *arg_impl) = 0;
-  virtual detail::ArgumentParserImpl *get_parser_impl() = 0;
+  virtual shared_ptr<GenericArgument> add_generic(OptionsSpec spec) const = 0;
 
-public:
-  template <class Action>
-  Argument<typename std::decay_t<Action>::value_type> add_generic(OptionsSpec spec, Action &&action) {
-    auto &impl = make_argument_impl(std::move(spec));
-    action.initialize(impl);
-    set_handler(impl, detail::Handler(std::move(action)));
-    return { &impl };
-  }
+  /**
+   * Returns the parser that this container is a part of.
+   **/
+  virtual ArgumentParser get_parser() const = 0;
+
 
   template <class Value = string>
-  Argument<Value> add(OptionsSpec spec) {
-    return Argument<Value>(add_generic(std::move(spec), action::store_single<Value>{}));
+  Argument<Value> add(OptionsSpec spec, SingleConverter<Value> conv = {}) const {
+    return action::store_single<Value>(add_generic(std::move(spec)), std::move(conv));
   }
 
   template <class Value = optional<string>>
-  Argument<Value> add_optional(OptionsSpec spec, Value missing = {}) {
-    return Argument<Value>(add_generic(std::move(spec), action::store_optional<Value>(missing)));
+  Argument<Value> add_optional(OptionsSpec spec, Value missing = {}, SingleConverter<Value> conv = {}) const {
+    return action::store_optional<Value>(add_generic(std::move(spec)), std::move(missing), std::move(conv));
   }
 
-
-  template <class Value = std::string>
-  Argument<std::vector<Value>> add_multi(OptionsSpec spec, Nargs nargs) {
-    return Argument<std::vector<Value>>(add_generic(std::move(spec), action::store_multi<Value>(nargs)));
+  template <class Value = vector<string>>
+  Argument<Value> add_multi(OptionsSpec spec, Nargs nargs, MultiConverter<Value> conv = {}) const {
+    return action::store_multi<Value>(add_generic(std::move(spec)), nargs, std::move(conv));
   }
 
   /**
-   * Stores the specified constant.
+   * \brief Stores the specified constant.
    **/
   template <class Value = bool>
-  Argument<Value> add_flag(OptionsSpec spec, Value const &value = true) {
-    return Argument<Value>(add_generic(std::move(spec), action::store_flag<Value>(value)));
+  Argument<Value> add_flag(OptionsSpec spec, Value value = true) const {
+    return action::store_flag<Value>(add_generic(std::move(spec)), std::move(value));
   }
 
   template <class Value = bool>
-  Argument<vector<Value>> add_append_flag(OptionsSpec spec, Value const &value = true) {
-    return Argument<vector<Value>>(add_generic(std::move(spec), action::append_flag<Value>(value)));
+  Argument<vector<Value>> add_append_flag(OptionsSpec spec, Value value = true) const {
+    return action::append_flag<Value>(add_generic(std::move(spec)), std::move(value));
   }
 
   template <class Value = string>
-  Argument<vector<Value>> add_append(OptionsSpec spec) {
-    return Argument<vector<Value>>(add_generic(std::move(spec), action::append<Value>{}));
+  Argument<vector<Value>> add_append(OptionsSpec spec, SingleConverter<Value> conv = {}) const {
+    return action::append(add_generic(std::move(spec)), std::move(conv));
   }
 
   template <class Value = size_t>
-  Argument<Value> add_count(OptionsSpec spec) {
-    return Argument<Value>(add_generic(std::move(spec), action::count_action<Value>{}));
+  Argument<Value> add_count(OptionsSpec spec) const {
+    return action::count(add_generic(std::move(spec)));
   }
-
-  /**
-   * \brief Adds a default option for printing the help message.
-   *
-   * A short 'h' and long 'help' option will be defined, using the default prefix character.
-   *
-   * When this option is parsed, the help message will be printed to standard output, and then exit(0) will be called.
-   **/
-  Argument<void> add_help_option();
 
   /**
    * \brief Adds an option for printing the help message.
    *
+   * \param spec If not specified, defaults to defining a short 'h' and long 'help' option, using the default prefix character.
+   *
    * When this message is parsed, the help message will be printed to standard output, and then exit(0) will be called.
    **/
-  Argument<void> add_help_option(OptionsSpec spec);
+  Argument<void> add_help_option(OptionsSpec spec = {}, HelpFormatterParameters const &params = {}) const;
+  Argument<void> add_help_option(HelpFormatterParameters const &params) const {
+    return add_help_option({}, params);
+  }
 
   /**
    * \brief Adds an option for printing a simple message and exiting, e.g. for version information.
    *
    * The specified message will be printed to standard output, and then exit(0) will be called.
    **/
-  Argument<void> add_print_option(OptionsSpec spec, string message);
+  Argument<void> add_print_option(OptionsSpec spec, string message) const;
+
+  /**
+   * \brief Adds a default option for printing version information.
+   *
+   * Defines a short 'h' option and a long 'help' option using the default prefix character.
+   **/
+  Argument<void> add_version_option(string message) const;
 
   /**
    * \brief Adds a default option for printing version information.
    **/
-  Argument<void> add_version_option(string message);
+  Argument<void> add_version_option(OptionsSpec spec, string message) const;
 
-  /**
-   * \brief Adds a default option for printing version information.
-   **/
-  Argument<void> add_version_option(OptionsSpec spec, string message);
-
-  Subparsers add_subparsers(OptionsSpec spec);
-  Subparsers add_subparsers();
+  Subparsers add_subparsers(OptionsSpec spec = {}) const;
 };
 
-}
 
 /**
  * \brief Simple grouping construct for arguments
@@ -452,60 +644,65 @@ public:
  *
  * Groups cannot be nested.
  **/
-class ArgumentGroup : public detail::ArgumentContainer {
+class ArgumentGroup : public ArgumentContainer {
 public:
 
-  ArgumentGroup &title(string title);
-  ArgumentGroup &description(string description);
+  virtual shared_ptr<GenericArgument> add_generic(OptionsSpec spec) const override;
+  virtual ArgumentParser get_parser() const override;
+
+
+  ArgumentGroup title(string title) const;
+  ArgumentGroup description(string description) const;
+
+
+  MutuallyExclusiveGroup add_mutually_exclusive_group(bool required = false) const;
+
+
+
+  /**
+   * \brief Opaque implementation data
+   **/
+  struct Impl;
 
   ArgumentGroup() = default;
+  explicit operator bool () const { return bool(impl); }
 
-  MutuallyExclusiveGroup add_mutually_exclusive_group(bool required = false);
-
-public:
-  // for internal use only
-  virtual void register_argument_impl(detail::ArgumentImpl *arg_impl) override;
-  virtual detail::ArgumentParserImpl *get_parser_impl() override;
-
-public:
-  struct Impl;
-  ArgumentGroup(Impl *impl)
-    : impl_(impl)
+  ArgumentGroup(shared_ptr<Impl> impl)
+    : impl(impl)
   {}
 
-private:
-  Impl *impl_ = nullptr;
+  shared_ptr<Impl> impl;
 };
 
-class MutuallyExclusiveGroup : public detail::ArgumentContainer {
+class MutuallyExclusiveGroup : public ArgumentContainer {
 public:
+
+  virtual shared_ptr<GenericArgument> add_generic(OptionsSpec spec) const override;
+  virtual ArgumentParser get_parser() const override;
+
+  /**
+   * \brief Opaque implementation data
+   **/
+  struct Impl;
+
   MutuallyExclusiveGroup() = default;
+  explicit operator bool () const { return bool(impl); }
 
-public:
-  // for internal use only
-  virtual void register_argument_impl(detail::ArgumentImpl *arg_impl) override;
-  virtual detail::ArgumentParserImpl *get_parser_impl() override;
-
-public:
-  struct Impl;
-  MutuallyExclusiveGroup(Impl *impl)
-    : impl_(impl)
+  MutuallyExclusiveGroup(shared_ptr<Impl> impl, ArgumentGroup group = {})
+    : impl(impl), group(group)
   {}
 
-public:
-  Impl *impl_ = nullptr;
+  /**
+   * Returns a mutually exclusive group that shares mutual exclusion with this group but places arguments into the specified ArgumentGroup.
+   **/
+  MutuallyExclusiveGroup operator[](ArgumentGroup group) const { return MutuallyExclusiveGroup(this->impl, group); }
+
+  shared_ptr<Impl> impl;
+  ArgumentGroup group;
 };
 
-class ArgumentParser : public detail::ArgumentContainer {
+class ArgumentParser : public ArgumentContainer {
 public:
-  ArgumentParser();
-  ArgumentParser(ArgumentParser &&other) = default;
-  ArgumentParser(ArgumentParser const &other) = default;
-  ~ArgumentParser();
-
-  ArgumentParser &operator=(ArgumentParser &&other) = default;
-  ArgumentParser &operator=(ArgumentParser const &other) = default;
-
   ArgumentGroup add_group(string title = {}, string description = {});
 
   /**
@@ -524,6 +721,18 @@ public:
   void parse(Result &result, vector<string_view> args) const;
 
   /**
+   * Extra arguments will remain in \p args and are not considered an error.
+   * \throws ParseError on failure
+   **/
+  void try_parse_known_args(Result &result, vector<string_view> &args);
+
+  /**
+   * Extra arguments will remain in \p args and are not considered an error.
+   * Exits with status 1 on failure.
+   **/
+  void parse_known_args(Result &result, vector<string_view> &args);
+
+  /**
    * \throws ParseError on failure
    **/
   Result try_parse(int argc, char **argv) const;
@@ -539,35 +748,55 @@ public:
   void try_parse(Result &result, vector<string_view> args) const;
 
 
-  void print_usage(std::ostream &, int width = 0) const;
-  string usage_string(int width = 0) const;
+  void print_usage(std::ostream &, HelpFormatterParameters const &params = {}) const;
+  string usage_string(HelpFormatterParameters const &params = {}) const;
 
-  void print_help(std::ostream &, int width = 0) const;
-  string help_string(int width = 0) const;
+  void print_help(std::ostream &, HelpFormatterParameters const &params = {}) const;
+  string help_string(HelpFormatterParameters const &params = {}) const;
 
-  ArgumentParser &prog(string prog_name);
-  ArgumentParser &description(string s);
-  ArgumentParser &epilog(string s);
-  ArgumentParser &usage(string s);
+  ArgumentParser prog(string prog_name) const;
 
-  ArgumentParser &prefix_chars(string value);
+  /**
+   * \brief Sets the prog name to equal super_parser's prog name + " " + prog_name
+   *
+   * This relationship will hold dynamically even if the super parser's prog is set at a later time.
+   * A weak reference to the super parser will be held.
+   **/
+  ArgumentParser prog_as_subparser(ArgumentParser const &super_parser, string prog_name) const ;
 
-  MutuallyExclusiveGroup add_mutually_exclusive_group(bool required = false);
+  ArgumentParser description(string s) const;
+  ArgumentParser epilog(string s) const;
+  ArgumentParser usage(string s) const;
+
+  ArgumentParser prefix_chars(string value) const;
+
+  MutuallyExclusiveGroup add_mutually_exclusive_group(bool required = false) const;
 
   /**
    * \brief Copies the arguments and groups defined in another parser
    **/
-  ArgumentParser &parent(ArgumentParser const &parent);
+  ArgumentParser parent(ArgumentParser const &parent) const;
 
-public:
-  // for internal use only
-  virtual void register_argument_impl(detail::ArgumentImpl *arg_impl) override;
-  virtual detail::ArgumentParserImpl *get_parser_impl() override;
 
-public:
-  // These members are for internal use only.
-  std::shared_ptr<detail::ArgumentParserImpl> impl_;
+  virtual shared_ptr<GenericArgument> add_generic(OptionsSpec spec) const override;
+  virtual ArgumentParser get_parser() const override;
+
+
+  ArgumentParser clone() const;
+
+  /**
+   * \brief Opaque implementation data.
+   **/
+  struct Impl;
+
+  ArgumentParser() = default;
+  ArgumentParser(shared_ptr<Impl> impl)
+    : impl(impl)
+  {}
+  shared_ptr<Impl> impl;
 };
+
+ArgumentParser make_parser();
 
 class ParseError : public std::invalid_argument {
   ArgumentParser parser_;

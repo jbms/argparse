@@ -162,18 +162,18 @@ std::vector<string_view> get_string_view_vec(std::vector<std::string> const &a) 
 
 struct ParserTestCase : public ::testing::Test {
 
-  using InitFunction = std::function<void (ArgumentParser &)>;
+  using InitFunction = std::function<void (ArgumentParser const &)>;
   InitFunction init_function;
 
   ParserTestCase() {
-    init_function = [](ArgumentParser &) {};
+    init_function = [](ArgumentParser const &) {};
   }
 
   void init(InitFunction x) {
     init_function = x;
   }
 
-  using ArgsFunction = std::function<void (detail::ArgumentContainer &)>;
+  using ArgsFunction = std::function<void (ArgumentContainer const &)>;
   std::vector<ArgsFunction> args_functions;
   void args(ArgsFunction x) {
     args_functions.push_back(x);
@@ -184,7 +184,7 @@ struct ParserTestCase : public ::testing::Test {
 
     // no groups
     {
-      ArgumentParser parser;
+      auto parser = make_parser();
       init_function(parser);
 
       for (auto const &a : args_functions) {
@@ -196,7 +196,7 @@ struct ParserTestCase : public ::testing::Test {
 
     // one group
     {
-      ArgumentParser parser;
+      auto parser = make_parser();
       init_function(parser);
 
       auto group = parser.add_group("foo");
@@ -210,7 +210,7 @@ struct ParserTestCase : public ::testing::Test {
 
     // many groups
     {
-      ArgumentParser parser;
+      auto parser = make_parser();
       init_function(parser);
 
       size_t i = 0;
