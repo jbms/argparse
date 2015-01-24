@@ -155,7 +155,7 @@ static void get_nargs_range(NargsValue nargs, size_t &min, size_t &max) {
 class GenericArgument {
 public:
 
-  string dest;
+  string key;
   vector<string> option_strings;
   optional<string> help = string{};
   vector<string> metavar;
@@ -187,7 +187,7 @@ public:
     if (!metavar.empty())
       return metavar.front();
     // FIXME: this might not be correct
-    return dest;
+    return key;
   }
 
   bool is_positional() const { return option_strings.empty(); }
@@ -196,7 +196,7 @@ public:
 
   virtual shared_ptr<GenericArgument> clone_for(ArgumentParser const &parser) {
     shared_ptr<GenericArgument> x(new GenericArgument);
-    x->dest = this->dest;
+    x->key = this->key;
     x->option_strings = this->option_strings;
     x->help = this->help;
     x->metavar = this->metavar;
@@ -223,8 +223,8 @@ public:
       return ostr.str();
     }
     if (is_positional())
-      return dest;
-    return ascii_to_upper(dest);
+      return key;
+    return ascii_to_upper(key);
   }
 };
 
@@ -279,8 +279,8 @@ void add_choice_help(GenericArgument &arg, string name, string invocation, Optio
   arg.choice_help.emplace_back(std::move(name), std::move(invocation), std::move(help));
 }
 
-string const &get_dest(GenericArgument &arg) {
-  return arg.dest;
+string const &get_key(GenericArgument &arg) {
+  return arg.key;
 }
 
 ArgumentParser get_parser(GenericArgument &arg) {
@@ -371,7 +371,7 @@ ArgumentParser ArgumentGroup::get_parser() const { return ArgumentParser(impl->p
 ArgumentParser MutuallyExclusiveGroup::get_parser() const { return ArgumentParser(impl->parser.lock()); }
 
 
-void copy_actions(ArgumentParser const &source, ArgumentParser const &dest);
+void copy_actions(ArgumentParser const &source, ArgumentParser const &key);
 
 ArgumentParser ArgumentParser::clone() const {
   auto p = make_parser();
@@ -766,7 +766,7 @@ struct ParserState {
     if (!actually_matched && !action->default_value.empty()) {
       // For positional arguments that match zero arguments, just use the default value
     } else {
-      action->handler(parser, parse_result, action->dest, args);
+      action->handler(parser, parse_result, action->key, args);
     }
   }
 
@@ -776,8 +776,8 @@ struct ParserState {
 
   void set_defaults() {
     for (auto const &a : impl().actions) {
-      if (!a->default_value.empty() && !parse_result.count(a->dest))
-        parse_result[a->dest] = a->default_value;
+      if (!a->default_value.empty() && !parse_result.count(a->key))
+        parse_result[a->key] = a->default_value;
     }
   }
 
@@ -1039,16 +1039,16 @@ static shared_ptr<GenericArgument> make_argument(shared_ptr<ArgumentParser::Impl
 
   if (names.size() == 1 && (names.front().empty() || !impl->is_prefix_char(names[0][0]))) {
     // positional argument
-    arg_impl->dest = std::move(names[0]);
+    arg_impl->key = std::move(names[0]);
   } else {
     string_view long_option;
-    string_view dest;
+    string_view key;
     size_t name_i = 0;
 
     if (names[0].empty() ||
         !impl->is_prefix_char(names[0][0])) {
-      // first name specifies the dest
-      dest = names[0];
+      // first name specifies the key
+      key = names[0];
       name_i = 1;
     }
 
@@ -1066,14 +1066,14 @@ static shared_ptr<GenericArgument> make_argument(shared_ptr<ArgumentParser::Impl
     }
     if (long_option.empty())
       long_option = names[0];
-    if (dest.empty()) {
+    if (key.empty()) {
       // trim off the prefix characters
       size_t j = 0;
       while (j < long_option.size() && impl->is_prefix_char(long_option[j]))
         ++j;
-      dest = long_option.substr(j);
+      key = long_option.substr(j);
     }
-    arg_impl->dest = string(dest);
+    arg_impl->key = string(key);
 
     register_option_strings(impl, *arg_impl);
   }
@@ -1929,7 +1929,7 @@ struct SubparsersHandler {
   vector<SubparserEntry> parsers;
   std::unordered_map<string_view,size_t> parser_map;
 
-  void operator()(ArgumentParser const &, Result &result, string const &dest, vector<string_view> values) const {
+  void operator()(ArgumentParser const &, Result &result, string const &key, vector<string_view> values) const {
     auto command = values.at(0);
 
     if (auto entry_num = find_ptr(parser_map, command)) {
@@ -1943,8 +1943,8 @@ struct SubparsersHandler {
       throw std::invalid_argument("unknown " + command_metavar + " " + repr(command));
     }
 
-    if (!dest.empty())
-      result[dest] = string(command);
+    if (!key.empty())
+      result[key] = string(command);
   }
 };
 
@@ -1969,7 +1969,7 @@ Handler copy_subparsers_handler(GenericArgument &arg, Handler const &handler_fun
 
 Subparsers ArgumentContainer::add_subparsers(OptionsSpec spec) const {
   if (spec.empty())
-    spec.push_back(string() /* empty dest */);
+    spec.push_back(string() /* empty key */);
   auto generic = add_generic(std::move(spec));
   set_nargs(*generic, PARSER);
   set_handler(*generic, detail::SubparsersHandler(*generic), &detail::copy_subparsers_handler);
