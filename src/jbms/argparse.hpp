@@ -147,7 +147,7 @@ public:
   using std::unordered_map<string,any>::unordered_map;
 
   /**
-   * \brief Retrieves the result with the specified key \ref name and type \p T
+   * \brief Retrieves the result with the specified key \p name and type \p T
    * \tparam T The type of the stored result
    **/
   template <class T>
@@ -421,7 +421,8 @@ template <class T>
 class SingleConverter {
 public:
   using value_type = T;
-  std::function<T (string_view s)> convert;
+  using Convert = std::function<T (string_view s)>;
+  Convert convert;
   OptionalString metavar;
 
   /**
@@ -432,10 +433,9 @@ public:
   /**
    * Construct from a conversion function
    **/
-  SingleConverter(std::function<T (string_view)> convert,
-                  OptionalString metavar = {})
-    : convert(std::move(convert)), metavar(std::move(metavar))
-  {}
+  template <class ConvertT, std::enable_if_t<std::is_constructible<Convert, ConvertT &&>::value> * = nullptr>
+  SingleConverter(ConvertT &&convert, OptionalString metavar = {})
+      : convert(std::forward<ConvertT>(convert)), metavar(std::move(metavar)) {}
 
   /**
    * Construct from a list of choices
@@ -520,9 +520,10 @@ public:
   /**
    * Construct from a conversion function
    **/
-  MultiConverter(Convert convert,
+  template <class ConvertT, std::enable_if_t<std::is_constructible<Convert, ConvertT &&>::value> * = nullptr>
+  MultiConverter(ConvertT &&convert,
                  OptionsSpec metavar = {})
-    : convert(std::move(convert)), metavar(std::move(metavar))
+    : convert(std::forward<ConvertT>(convert)), metavar(std::move(metavar))
   {}
 };
 
@@ -537,6 +538,7 @@ public:
   using value_type = vector<Element>;
   using element_type = Element;
   using Convert = std::function<value_type (vector<string_view> const &)>;
+  using SingleConvert = std::function<element_type (string_view)>;
   Convert convert;
   OptionsSpec metavar;
 
@@ -548,9 +550,10 @@ public:
   /**
    * Construct from a conversion function
    **/
-  MultiConverter(Convert convert,
+  template <class ConvertT, std::enable_if_t<std::is_constructible<Convert, ConvertT &&>::value> * = nullptr>
+  MultiConverter(ConvertT &&convert,
                  OptionsSpec metavar = {})
-    : convert(std::move(convert)), metavar(std::move(metavar))
+    : convert(std::forward<ConvertT>(convert)), metavar(std::move(metavar))
   {}
 
   /**
@@ -564,9 +567,10 @@ public:
   /**
    * Construct from a single conversion function
    **/
-  MultiConverter(std::function<element_type (string_view)> convert,
+  template <class ConvertT, std::enable_if_t<std::is_constructible<SingleConvert, ConvertT &&>::value> * = nullptr>
+  MultiConverter(ConvertT &&convert,
                  OptionalString metavar = {})
-    : MultiConverter(SingleConverter<element_type>(std::move(convert), std::move(metavar)))
+    : convert(convert_all_arguments(std::forward<ConvertT>(convert))), metavar(std::move(metavar))
   {}
 
   /**
