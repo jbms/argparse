@@ -1143,7 +1143,7 @@ static vector<string> wordwrap_paragraph(string_view input, size_t width) {
 
 void ParseError::handle() const {
   parser().print_usage(std::cerr);
-  std::cerr << parser().impl->prog << ": error: " << what() << std::endl;
+  std::cerr << parser().impl->get_prog() << ": error: " << what() << std::endl;
   std::exit(1);
 }
 
@@ -1220,6 +1220,10 @@ void ArgumentParser::try_parse(Result &result, vector<string_view> args) const {
     if (!state.extras.empty()) {
       throw std::invalid_argument("unrecognized arguments: " + join(" ", state.extras));
     }
+  }
+  catch (ParseError &) {
+    // Don't re-wrap an existing ParseError from a subparser
+    throw;
   }
   catch (std::invalid_argument &e) {
     throw ParseError(*this, e.what());
