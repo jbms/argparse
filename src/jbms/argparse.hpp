@@ -150,7 +150,7 @@ public:
    * \brief Retrieves the result with the specified key \p name and type \p T
    * \tparam T The type of the stored result
    **/
-  template <class T>
+  template <class T = std::string>
   T const *get(std::string const &name) const {
     auto it = find(name);
     if (it == end() || it->second.empty())
@@ -596,7 +596,7 @@ public:
 namespace action {
 
 template <class T = string>
-Argument<T> store_single(shared_ptr<GenericArgument> generic, SingleConverter<T> convert = {}) {
+Argument<T> store_single(shared_ptr<GenericArgument> generic, std::common_type_t<SingleConverter<T>> convert = {}) {
   set_nargs(*generic, 1);
   set_metavar(*generic, std::move(convert.metavar));
   set_handler(*generic,
@@ -607,9 +607,10 @@ Argument<T> store_single(shared_ptr<GenericArgument> generic, SingleConverter<T>
   return Argument<T>(std::move(generic));
 }
 
-
 template <class Value = optional<string>>
-Argument<Value> store_optional(shared_ptr<GenericArgument> generic, Value missing_value = {}, SingleConverter<Value> convert = {}) {
+Argument<Value> store_optional(shared_ptr<GenericArgument> generic,
+                               Value missing_value = {},
+                               std::common_type_t<SingleConverter<Value>> convert = {}) {
   set_nargs(*generic, OPTIONAL);
   set_metavar(*generic, std::move(convert.metavar));
   set_handler(
@@ -630,7 +631,7 @@ Argument<Value> store_optional(shared_ptr<GenericArgument> generic, Value missin
 }
 
 template <class T = vector<string>>
-Argument<T> store_multi(shared_ptr<GenericArgument> generic, Nargs nargs, MultiConverter<T> convert = {}) {
+Argument<T> store_multi(shared_ptr<GenericArgument> generic, Nargs nargs, std::common_type_t<MultiConverter<T>> convert = {}) {
   set_nargs(*generic, nargs);
   set_metavar(*generic, std::move(convert.metavar));
   set_handler(*generic,
@@ -655,7 +656,7 @@ auto store_flag(shared_ptr<GenericArgument> generic, T value) {
 }
 
 template <class T = string>
-Argument<vector<T>> append(shared_ptr<GenericArgument> generic, SingleConverter<T> convert = {}) {
+Argument<vector<T>> append(shared_ptr<GenericArgument> generic, std::common_type_t<SingleConverter<T>> convert = {}) {
   using Value = vector<T>;
 
   set_nargs(*generic, 1);
@@ -824,7 +825,7 @@ public:
    * \tparam Value The result type, which defaults to \p string
    **/
   template <class Value = string>
-  Argument<Value> add(OptionsSpec spec, SingleConverter<Value> conv = {}) const {
+  Argument<Value> add(OptionsSpec spec, std::common_type_t<SingleConverter<Value>> conv = {}) const {
     return action::store_single<Value>(add_generic(std::move(spec)), std::move(conv));
   }
 
@@ -838,7 +839,7 @@ public:
    * \tparam Value The result type, which defaults to \p optional<string>
    **/
   template <class Value = optional<string>>
-  Argument<Value> add_optional(OptionsSpec spec, Value missing = {}, SingleConverter<Value> conv = {}) const {
+  Argument<Value> add_optional(OptionsSpec spec, Value missing = {}, std::common_type_t<SingleConverter<Value>> conv = {}) const {
     return action::store_optional<Value>(add_generic(std::move(spec)), std::move(missing), std::move(conv));
   }
 
@@ -847,7 +848,7 @@ public:
    * \param nargs Constrains the matching of arguments, see \ref Nargs.
    **/
   template <class Value = vector<string>>
-  Argument<Value> add_multi(OptionsSpec spec, Nargs nargs, MultiConverter<Value> conv = {}) const {
+  Argument<Value> add_multi(OptionsSpec spec, Nargs nargs, std::common_type_t<MultiConverter<Value>> conv = {}) const {
     return action::store_multi<Value>(add_generic(std::move(spec)), nargs, std::move(conv));
   }
 
@@ -888,7 +889,7 @@ public:
    * \tparam Value The \p value_type of the result vector, \p std::string by default.
    **/
   template <class Value = string>
-  Argument<vector<Value>> add_append(OptionsSpec spec, SingleConverter<Value> conv = {}) const {
+  Argument<vector<Value>> add_append(OptionsSpec spec, std::common_type_t<SingleConverter<Value>> conv = {}) const {
     return action::append(add_generic(std::move(spec)), std::move(conv));
   }
 
