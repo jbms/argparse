@@ -770,6 +770,17 @@ struct ParserState {
     }
   }
 
+  void take_action_or_format_error(GenericArgument const *action, string_view option_string, vector<string_view> args) {
+    try {
+      take_action(action, option_string, std::move(args));
+    } catch (std::invalid_argument &e) {
+      auto name = action->name();
+      if (name.empty())
+        throw;
+      throw std::invalid_argument(name + ": " + e.what());
+    }
+  }
+
   void take_action(PendingAction &a) {
     take_action(a.action, a.option_string, std::move(a.args));
   }
@@ -899,7 +910,7 @@ struct ParserState {
     }
 
     vector<size_t> pattern_offsets;
-    string positional_pattern;
+    string positional_pattern = "^";
     for (auto action : positional_actions) {
       positional_pattern += "O?(";
       switch (action->nargs) {
@@ -928,13 +939,14 @@ struct ParserState {
     size_t arg_i = 0;
     for (size_t num_actions = pattern_offsets.size(); num_actions > 0; --num_actions) {
       std::regex positional_re(positional_pattern.substr(0,pattern_offsets[num_actions-1]));
-      if (std::regex_match(positional_desc, match, positional_re)) {
+      if (std::regex_search(positional_desc, match, positional_re)) {
         vector<string_view> cur_args;
         for (size_t action_i = 0; action_i < num_actions; ++action_i) {
           size_t end_arg_i = arg_i + match[action_i+1].length();
           cur_args.assign(available_args.begin() + arg_i, available_args.begin() + end_arg_i);
           arg_i = end_arg_i;
-          take_action(positional_actions[action_i], {} /* optional string*/, std::move(cur_args));
+          auto action = positional_actions[action_i];
+          take_action_or_format_error(action, {} /* optional string*/, std::move(cur_args));
         }
         break;
       }
@@ -957,8 +969,7 @@ struct ParserState {
         auto action = positional_actions[positional_action_index];
         auto cur_args = consume_arguments(action->nargs, true /* is positional */);
         ++positional_action_index;
-        // FIXME: need to insert argument name for error handling
-        take_action(action, {}/* option string*/, std::move(cur_args));
+        take_action_or_format_error(action, {}/* option string*/, std::move(cur_args));
       } else {
         auto arg = input[arg_index];
 
@@ -978,7 +989,7 @@ struct ParserState {
         break;
 
       ++positional_action_index;
-      take_action(action, {}/* option string*/, {} /* no args */);
+      take_action_or_format_error(action, {}/* option string*/, {} /* no args */);
     }
   }
 
@@ -1220,10 +1231,6 @@ void ArgumentParser::try_parse(Result &result, vector<string_view> args) const {
     if (!state.extras.empty()) {
       throw std::invalid_argument("unrecognized arguments: " + join(" ", state.extras));
     }
-  }
-  catch (ParseError &) {
-    // Don't re-wrap an existing ParseError from a subparser
-    throw;
   }
   catch (std::invalid_argument &e) {
     throw ParseError(*this, e.what());

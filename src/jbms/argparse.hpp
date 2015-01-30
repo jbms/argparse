@@ -1219,11 +1219,11 @@ ArgumentParser make_parser();
 /**
  * \brief Exception representing a command-line parsing error
  **/
-class ParseError : public std::invalid_argument {
+class ParseError : public std::runtime_error {
   ArgumentParser parser_;
 public:
   ParseError(ArgumentParser parser_, std::string const &message)
-    : std::invalid_argument(message), parser_(parser_)
+    : std::runtime_error(message), parser_(parser_)
   {}
 
   /**
