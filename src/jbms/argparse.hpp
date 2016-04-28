@@ -671,6 +671,36 @@ Argument<vector<T>> append(shared_ptr<GenericArgument> generic, std::common_type
   return Argument<Value>(std::move(generic));
 }
 
+template <class T = vector<string>>
+Argument<vector<T>> append_multi(shared_ptr<GenericArgument> generic, Nargs nargs, std::common_type_t<MultiConverter<T>> convert = {}) {
+  using Value = vector<T>;
+  set_nargs(*generic, nargs);
+  set_default_value(*generic, Value());
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(*generic,
+              [conv = std::move(convert.convert)](
+                  ArgumentParser const &, Result & result, string const & key, vector<string_view> const & values) {
+
+    any_cast<Value &>(result[key]).emplace_back(conv(values));
+  });
+  return Argument<Value>(std::move(generic));
+}
+
+template <class T = string>
+Argument<vector<T>> concat_multi(shared_ptr<GenericArgument> generic, Nargs nargs, std::common_type_t<SingleConverter<T>> convert = {}) {
+  using Value = vector<T>;
+  set_nargs(*generic, nargs);
+  set_default_value(*generic, Value());
+  set_metavar(*generic, std::move(convert.metavar));
+  set_handler(*generic,
+              [conv = std::move(convert.convert)](
+                  ArgumentParser const &, Result & result, string const & key, vector<string_view> const & values) {
+    auto &v = any_cast<Value &>(result[key]);
+    for (auto s : values)
+      v.emplace_back(conv(s));
+  });
+}
+
 template <class T>
 Argument<vector<T>> append_flag(shared_ptr<GenericArgument> generic, T value) {
   using Value = std::vector<T>;
@@ -892,6 +922,42 @@ public:
   Argument<vector<Value>> add_append(OptionsSpec spec, std::common_type_t<SingleConverter<Value>> conv = {}) const {
     return action::append(add_generic(std::move(spec)), std::move(conv));
   }
+
+  /**
+   * \brief Match a list of arguments, and aggregate the results without flattening.
+   *
+   * The result from each match, which is a \p vector<string> by default, is appended (not concatenated) to the stored result,
+   * which is \p vector<vector<string>> by default.
+   *
+   * The initial/default value is an empty vector.
+   *
+   * \param spec Specifies the result key and/or the option strings
+   * \param nargs Constrains the matching of arguments, see \ref Nargs.
+   * \tparam Value The \p value_type of the result vector, \p vector<string> by default.
+   **/
+  template <class Value = vector<string>>
+  Argument<vector<Value>>
+  add_append_multi(OptionsSpec spec, Nargs nargs, std::common_type_t<MultiConverter<Value>> conv = {}) const {
+    return action::append_multi(add_generic(std::move(spec)), nargs, std::move(conv));
+  }
+
+  /**
+   * \brief Match a list of arguments, and concatenate them to the end of the existing result vector.
+   *
+   * Each argument is converted individually and appended to the end of the result vector.
+   *
+   * The initial/default value is an empty vector.
+   *
+   * \param spec Specifies the result key and/or the option strings
+   * \param nargs Constrains the matching of arguments, see \ref Nargs.
+   * \tparam Value The \p value_type of the result vector, \p string by default.
+   **/
+  template <class Value = string>
+  Argument<vector<Value>>
+  add_concat_multi(OptionsSpec spec, Nargs nargs, std::common_type_t<SingleConverter<Value>> conv = {}) const {
+    return action::concat_multi(add_generic(std::move(spec)), nargs, std::move(conv));
+  }
+
 
   /**
    * \brief Match a flag/switch without arguments, and count the number of occurrences

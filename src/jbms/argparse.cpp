@@ -53,7 +53,7 @@ static bool starts_with(string_view s, string_view prefix) {
   return s.size() >= prefix.size() && memcmp(&s[0], &prefix[0], prefix.size() * sizeof(string_view::value_type)) == 0;
 }
 
-// This converts an ASCII string to uppercase.  This is broken for UTF-8 since in unicode and especially UTF-8 upper case is not a code-point-wise operation.
+// This converts an ASCII string to uppercase.  This is broken for UTF-8 since in unicode and especially UTF-8 upper case is not a code-unit-wise operation.
 static string ascii_to_upper(string_view s) {
   string result;
   result.reserve(s.size());
