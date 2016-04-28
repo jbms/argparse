@@ -79,7 +79,7 @@ target_include_directories(${test_name} PRIVATE
   )
 
 add_custom_command(OUTPUT ${gtest_dir}/src/gtest-all.cc
-  DEPENDS googletest-jbms-argparse)
+  DEPENDS googletest-${PROJECT_NAME})
 
 target_link_libraries("${test_name}" jbms-argparse
   #${Boost_UNIT_TEST_FRAMEWORK_LIBRARY}
