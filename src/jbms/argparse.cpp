@@ -5,11 +5,13 @@
 #include <cctype>
 #include <iostream>
 
-// Needed to determine terminal width
-// TODO: add support for Windows
-#include <sys/ioctl.h>
-#include <stdio.h>
-#include <unistd.h>
+#if defined(_WIN32) || defined(_WIN64) || \
+    (defined(__CYGWIN__) && !defined(_WIN32))
+  #include <windows.h>
+#elif defined(__linux__)
+  #include <sys/ioctl.h>
+  #include <unistd.h>
+#endif
 
 #include <boost/core/demangle.hpp>
 
@@ -112,6 +114,42 @@ static string join(string_view sep, Range const &args, Transform &&t = {}, Predi
   std::ostringstream ostr;
   join(ostr, sep, args, std::forward<Transform>(t), std::forward<Predicate>(p));
   return ostr.str();
+}
+
+/**
+ * @brief Structure to hold the terminal width's and height's information.
+ * @a row Terminal row number.
+ * @a col Terminal column number.
+ */
+struct win {
+  int row;
+  int col;
+};
+
+int64_t get_terminal_dimensions(struct win *__w) {
+  /**
+   * @brief Fills the given object with terminal dimensions.
+   * @param __w @a win object.
+   */
+#if defined(_WIN32) || defined(_WIN64) || \
+    (defined(__CYGWIN__) && !defined(_WIN32))
+  ::CONSOLE_SCREEN_BUFFER_INFO csbi;
+  ::GetConsoleScreenBufferInfo(::GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+  __w->row = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+  __w->col = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+  return 0;  // return 0 to the caller on success 
+#elif defined(__linux__)
+  struct ::winsize w;
+  int stat = ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+  if (stat != -1) {    // if ioctl return status is not -1 that means everything went right
+    __w->row = w.ws_row;
+    __w->col = w.ws_col;
+  } else {    // if ioctl return status is -1 that means everything went wrong
+    __w->row = -1;
+    __w->col = -1;
+  }
+  return stat;  // return ioctl status to the caller
+#endif
 }
 
 } // end namespace jbms::argparse::util
@@ -1402,16 +1440,12 @@ public:
     : HelpFormatterParameters(std::move(p))
   {
     if (width == 0) {
-
-
-      // TODO: add support for Windows
-      struct ::winsize w;
-      if (::ioctl(0, TIOCGWINSZ, &w) != -1) {
-        width = int(w.ws_col);
-      } else
-
+      util::win w;
+      if (util::get_terminal_dimensions(&w) != -1) {
+        width = w.col;
+      } else {
         width = 80;
-
+      }
       width -= 2;
     }
     max_help_position = std::min(max_help_position, std::max(width - 20, indent_increment * 2));
