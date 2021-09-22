@@ -5,8 +5,7 @@
 #include <cctype>
 #include <iostream>
 
-#if defined(_WIN32) || defined(_WIN64) || \
-    (defined(__CYGWIN__) && !defined(_WIN32))
+#if defined(_WIN64) || (defined(__CYGWIN__) && !defined(_WIN32))
   #include <windows.h>
 #elif defined(__linux__)
   #include <sys/ioctl.h>
@@ -121,34 +120,44 @@ static string join(string_view sep, Range const &args, Transform &&t = {}, Predi
  * @a row Terminal row number.
  * @a col Terminal column number.
  */
-struct win {
+struct window_size {
   int row;
   int col;
 };
 
-int64_t get_terminal_dimensions(struct win *__w) {
+bool get_terminal_dimensions(struct window_size &ws) {
   /**
    * @brief Fills the given object with terminal dimensions.
-   * @param __w @a win object.
+   * @param w @a win object.
+   * @returns true on success.
    */
-#if defined(_WIN32) || defined(_WIN64) || \
-    (defined(__CYGWIN__) && !defined(_WIN32))
+#if defined(_WIN64) || (defined(__CYGWIN__) \ 
+      && !defined(_WIN32))
   ::CONSOLE_SCREEN_BUFFER_INFO csbi;
-  ::GetConsoleScreenBufferInfo(::GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
-  __w->row = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-  __w->col = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-  return 0;  // return 0 to the caller on success 
+  int stat = ::GetConsoleScreenBufferInfo(::GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+  // GetConsoleScreenBufferInfo returns nonzero value on success and
+  // zero on failure
+  if (stat != 0) { // if the return status is nonzero that means everything went right
+    ws.row = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    ws.col = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    return true;
+  } else {  // if the return status is zero that means everything went wrong
+    ws.row = -1;
+    ws.col = -1;
+    return false;
+  }
 #elif defined(__linux__)
   struct ::winsize w;
   int stat = ::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
   if (stat != -1) {    // if ioctl return status is not -1 that means everything went right
-    __w->row = w.ws_row;
-    __w->col = w.ws_col;
+    ws.row = w.ws_row;
+    ws.col = w.ws_col;
+    return true;
   } else {    // if ioctl return status is -1 that means everything went wrong
-    __w->row = -1;
-    __w->col = -1;
+    ws.row = -1;
+    ws.col = -1;
+    return false;
   }
-  return stat;  // return ioctl status to the caller
 #endif
 }
 
@@ -1440,8 +1449,8 @@ public:
     : HelpFormatterParameters(std::move(p))
   {
     if (width == 0) {
-      util::win w;
-      if (util::get_terminal_dimensions(&w) != -1) {
+      util::window_size w;
+      if (util::get_terminal_dimensions(w) == true) {
         width = w.col;
       } else {
         width = 80;
