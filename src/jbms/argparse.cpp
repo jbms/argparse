@@ -5,11 +5,12 @@
 #include <cctype>
 #include <iostream>
 
-// Needed to determine terminal width
-// TODO: add support for Windows
-#include <sys/ioctl.h>
-#include <stdio.h>
-#include <unistd.h>
+#if defined(_WIN32) || defined(__CYGWIN__)
+  #include <windows.h>
+#else // will work for macOS, linux, BSD systems
+  #include <sys/ioctl.h>
+  #include <unistd.h>
+#endif
 
 #include <boost/core/demangle.hpp>
 
@@ -113,6 +114,43 @@ static string join(string_view sep, Range const &args, Transform &&t = {}, Predi
   join(ostr, sep, args, std::forward<Transform>(t), std::forward<Predicate>(p));
   return ostr.str();
 }
+
+/**
+ * @brief Structure to hold the terminal width's and height's information.
+ * @a row Terminal row number.
+ * @a col Terminal column number.
+ */
+struct window_size {
+  int row;
+  int col;
+};
+
+bool get_terminal_dimensions(struct window_size &w) {
+  /**
+   * @brief Fills the given object with terminal dimensions.
+   * @param w @a win object.
+   */
+#if defined(_WIN32) || defined(__CYGWIN__)
+  ::CONSOLE_SCREEN_BUFFER_INFO csbi;
+  // GetConsoleScreenBufferInfo will return a non-zero value if success
+  if (::GetConsoleScreenBufferInfo(::GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+    w.row = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    w.col = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    return true;
+  }
+  return false;
+#else // will work for macOS, linux, BSD systems
+  struct ::winsize w_;
+  // ioctl returns zero for success
+  if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w_) == 0) {
+    w.row = w_.ws_row;
+    w.col = w_.ws_col;
+    return true;
+  }
+  return false;
+#endif
+}
+
 
 } // end namespace jbms::argparse::util
 
@@ -1402,16 +1440,12 @@ public:
     : HelpFormatterParameters(std::move(p))
   {
     if (width == 0) {
-
-
-      // TODO: add support for Windows
-      struct ::winsize w;
-      if (::ioctl(0, TIOCGWINSZ, &w) != -1) {
-        width = int(w.ws_col);
-      } else
-
+      util::window_size w;
+      if (util::get_terminal_dimensions(w)) {
+        width = w.col;
+      } else {
         width = 80;
-
+      }
       width -= 2;
     }
     max_help_position = std::min(max_help_position, std::max(width - 20, indent_increment * 2));
