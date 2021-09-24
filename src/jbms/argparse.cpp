@@ -1164,15 +1164,6 @@ static vector<string> wordwrap_paragraph(string_view input, size_t width) {
       break;
     }
 
-#if 0
-    // Find last space in second half of line
-    auto line = input.substr(0, width);
-    auto second_half = line.substr(width / 2);
-    size_t space_pos = second_half.rfind(' ');
-    if (space_pos != string_view::npos) {
-      line = line.substr(0, space_pos + width / 2);
-    }
-#else
     // See if there is a space in the first width+1 characters
     auto line = input.substr(0, width+1);
     size_t space_pos = line.rfind(' ');
@@ -1181,7 +1172,6 @@ static vector<string> wordwrap_paragraph(string_view input, size_t width) {
       space_pos = input.find(' ', width+1);
     }
     line = input.substr(0, space_pos);
-#endif
 
     output.push_back(string(line));
     input.remove_prefix(line.size());
