@@ -19,15 +19,93 @@ namespace argparse {
 
 using std::weak_ptr;
 
-string repr(string_view s) {
-  // FIXME: make this escape bad characters
-  string x;
-  x += '\'';
-  x += string(s);
-  x += '\'';
-  return x;
+namespace {
+void chr_cstrliteral(char ch, string &buffer) {
+  /**
+   * \brief Escapes a single character \p ch and appends its escaped value onto
+   * the buffer.
+   * \param ch Character to escape (if a control character).
+   * \param buffer Buffer to store the escaped value in.
+   */ 
+  if ((ch >= 32 && ch <= 126) && ch != '\'' && ch != '\"' &&
+             ch != '\\') {
+    buffer +=
+        ch;  // opposite of control characters can be saved just as they are
+  } else {
+    switch (ch) {
+      case '\a':
+        buffer += "\\a";
+        break;
+      case '\b':
+        buffer += "\\b";
+        break;
+      case '\f':
+        buffer += "\\f";
+        break;
+      case '\n':
+        buffer += "\\n";
+        break;
+      case '\r':
+        buffer += "\\r";
+        break;
+      case '\t':
+        buffer += "\\t";
+        break;
+      case '\v':
+        buffer += "\\v";
+        break;
+      case '\\':
+        buffer += "\\\\";
+        break;
+      case '\'':
+        buffer += "\\'";
+        break;
+      case '\"':
+        buffer += "\\\"";
+        break;
+      default:
+        {
+          char buf[5];
+          snprintf(buf, 5, "\\%02x",
+                   ch);  // this handles control characters that are not
+                         // printable and does not meet any case
+          buffer += buf;
+        }
+        break;
+    }
+  }
 }
 
+void str_cstrliteral(const string &str, string &buffer) {
+  /**
+   * \brief Escapes the special string \p str and stores inside of the \p
+   * buffer.
+   * \param str Special characters string.
+   * \param buffer Buffer to store the escaped value in.
+   */
+  // FIXME: Make this escape NULL bytes as well
+  for (const auto &ch : str)
+    chr_cstrliteral(
+        ch, buffer);  // escape the character that we took out in this iteration
+}
+}  // namespace
+
+string repr(string str) {
+  /**
+   * \brief Escape ASCII control characters.
+   * \param str String to escape.
+   * \returns Escaped string.
+   */
+  size_t reserved_bits =
+      str.length() * 2;  // maximum length that the string
+                         // containing special characters can have
+  string buffer;
+  buffer.reserve(reserved_bits);  // reserve 'reserved_bits' bytes for buffer
+  str_cstrliteral(
+      str, buffer);  // escape special string and save inside of the buffer
+  str = buffer;
+  return str;
+}
 
 /**
  * Generic utilities
