@@ -63,48 +63,34 @@ void chr_cstrliteral(char ch, string &buffer) {
       case '\"':
         buffer += "\\\"";
         break;
-      default:
-        {
+      default: {
           char buf[5];
-          snprintf(buf, 5, "\\%02x",
-                   ch);  // this handles control characters that are not
-                         // printable and does not meet any case
+          snprintf(buf, 5, "\\x%02x",
+                   static_cast<unsigned char>(ch));  // this handles control 
+                                                     // characters that are not
+                                                     // printable and does not 
+                                                     // meet any case
           buffer += buf;
         }
         break;
     }
   }
 }
-
-void str_cstrliteral(const string &str, string &buffer) {
-  /**
-   * \brief Escapes the special string \p str and stores inside of the \p
-   * buffer.
-   * \param str Special characters string.
-   * \param buffer Buffer to store the escaped value in.
-   */
-  // FIXME: Make this escape NULL bytes as well
-  for (const auto &ch : str)
-    chr_cstrliteral(
-        ch, buffer);  // escape the character that we took out in this iteration
-}
 }  // namespace
 
-string repr(string str) {
+string repr(string_view str) {
   /**
    * \brief Escape ASCII control characters.
    * \param str String to escape.
    * \returns Escaped string.
    */
-  size_t reserved_bits =
-      str.length() * 2;  // maximum length that the string
-                         // containing special characters can have
   string buffer;
-  buffer.reserve(reserved_bits);  // reserve 'reserved_bits' bytes for buffer
-  str_cstrliteral(
-      str, buffer);  // escape special string and save inside of the buffer
+  buffer.reserve(str.size());  // reserve 'reserved_bits' bytes for buffer
+  for (const auto &ch : str)
+    chr_cstrliteral(
+        ch, buffer);  // escape the character that we took out in this iteration
   str = buffer;
-  return str;
+  return std::string(str);
 }
 
 /**
@@ -132,13 +118,791 @@ static bool starts_with(string_view s, string_view prefix) {
   return s.size() >= prefix.size() && memcmp(&s[0], &prefix[0], prefix.size() * sizeof(string_view::value_type)) == 0;
 }
 
-// This converts an ASCII string to uppercase.  This is broken for UTF-8 since in unicode and especially UTF-8 upper case is not a code-unit-wise operation.
 static string ascii_to_upper(string_view s) {
-  string result;
-  result.reserve(s.size());
-  for (auto x : s)
-    result.push_back((char)std::toupper(x));
-  return result;
+  /**
+   * \brief Converts UTF-8 encoded string to uppercase.
+   * \param s String to convert to uppercase.
+   * \returns Uppercased string.
+   */
+  size_t len = s.length();
+  if (len == 0)
+    return std::string(s);
+  // convert the string into a vector of 'unsigned char' type, this is
+  // neccessary as in the following code we'll be comparing the string elements
+  // against type that exceeds the basic 'char' type
+  vector<__uint8_t> str(s.data(), s.data() + len + 1);
+  for (size_t i = 0; i < len; ++i) {
+    if ((str[i] >= 0x61) && (str[i] <= 0x7a)) {  // US ASCII
+      str[i] -= 0x20;
+    } else if (str[i] > 0xc0) {
+      size_t ext_char_indx = i;
+      switch (str[ext_char_indx]) {
+        case 0xc3:  // Latin 1
+          // 0x9f Three byte capital 0xe1 0xba 0x9e
+          if ((str[ext_char_indx + 1] >= 0xa0) &&
+              (str[ext_char_indx + 1] <= 0xbe) &&
+              (str[ext_char_indx] != 0xb7)) {
+            str[ext_char_indx + 1] -= 0x20;
+          } else if (str[ext_char_indx + 1] == 0xbf) {
+            str[ext_char_indx] = 0xc5;
+            str[ext_char_indx + 1] = 0xb8;
+          }
+          break;
+        case 0xc4:  // Latin ext
+          if ((str[ext_char_indx + 1] >= 0x80) &&
+              (str[ext_char_indx + 1] <= 0xb7) &&
+              (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;        // Prev char is upr
+          else if ((str[ext_char_indx + 1] >= 0xb9) &&
+                   (str[ext_char_indx + 1] <= 0xbe) &&
+                   (!(str[ext_char_indx + 1] % 2)))  // Even
+            str[ext_char_indx + 1]--;                // Prev char is upr
+          break;
+        case 0xc5:  // Latin ext
+          if (str[ext_char_indx + 1] == 0x80) {
+            str[ext_char_indx] = 0xc4;
+            str[ext_char_indx + 1] = 0xbf;
+          } else if ((str[ext_char_indx + 1] >= 0x81) &&
+                     (str[ext_char_indx + 1] <= 0x88) &&
+                     (!(str[ext_char_indx + 1] % 2)))  // Even
+            str[ext_char_indx + 1]--;                  // Prev char is upr
+          else if ((str[ext_char_indx + 1] >= 0x8a) &&
+                   (str[ext_char_indx + 1] <= 0xb7) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xb8) {
+            str[ext_char_indx] = 0xc5;
+            str[ext_char_indx + 1] = 0xb8;
+          } else if ((str[ext_char_indx + 1] >= 0xb9) &&
+                     (str[ext_char_indx + 1] <= 0xbe) &&
+                     (!(str[ext_char_indx + 1] % 2)))  // Even
+            str[ext_char_indx + 1]--;                  // Prev char is upr
+          break;
+        case 0xc6:  // Latin ext
+          switch (str[ext_char_indx + 1]) {
+            case 0x83:
+            case 0x85:
+            case 0x88:
+            case 0x8c:
+            case 0x92:
+            case 0x99:
+            case 0xa1:
+            case 0xa3:
+            case 0xa5:
+            case 0xa8:
+            case 0xad:
+            case 0xb0:
+            case 0xb4:
+            case 0xb6:
+            case 0xb9:
+            case 0xbd:
+              str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            case 0x80:
+              str[ext_char_indx] = 0xc9;
+              str[ext_char_indx + 1] = 0x83;
+              break;
+            case 0x95:
+              str[ext_char_indx] = 0xc7;
+              str[ext_char_indx + 1] = 0xb6;
+              break;
+            case 0x9a:
+              str[ext_char_indx] = 0xc8;
+              str[ext_char_indx + 1] = 0xbd;
+              break;
+            case 0x9e:
+              str[ext_char_indx] = 0xc8;
+              str[ext_char_indx + 1] = 0xa0;
+              break;
+            case 0xbf:
+              str[ext_char_indx] = 0xc7;
+              str[ext_char_indx + 1] = 0xb7;
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xc7:  // Latin ext
+          if (str[ext_char_indx + 1] == 0x85)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0x86)
+            str[ext_char_indx + 1] = 0x84;
+          else if (str[ext_char_indx + 1] == 0x88)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0x89)
+            str[ext_char_indx + 1] = 0x87;
+          else if (str[ext_char_indx + 1] == 0x8b)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0x8c)
+            str[ext_char_indx + 1] = 0x8a;
+          else if ((str[ext_char_indx + 1] >= 0x8d) &&
+                   (str[ext_char_indx + 1] <= 0x9c) &&
+                   (!(str[ext_char_indx + 1] % 2)))  // Even
+            str[ext_char_indx + 1]--;                // Prev char is upr
+          else if ((str[ext_char_indx + 1] >= 0x9e) &&
+                   (str[ext_char_indx + 1] <= 0xaf) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xb2)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xb3)
+            str[ext_char_indx + 1] = 0xb1;
+          else if (str[ext_char_indx + 1] == 0xb5)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xb7) {
+            str[ext_char_indx] = 0xc6;
+            str[ext_char_indx + 1] = 0xbf;
+          } else if ((str[ext_char_indx + 1] >= 0xb9) &&
+                     (str[ext_char_indx + 1] <= 0xbf) &&
+                     (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;               // Prev char is upr
+          break;
+        case 0xc8:  // Latin ext
+          if ((str[ext_char_indx + 1] >= 0x80) &&
+              (str[ext_char_indx + 1] <= 0x9f) &&
+              (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;        // Prev char is upr
+          else if ((str[ext_char_indx + 1] >= 0xa2) &&
+                   (str[ext_char_indx + 1] <= 0xb3) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xbc)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          // 0xbf Three byte capital 0xe2 0xb1 0xbe
+          break;
+        case 0xc9:  // Latin ext
+          switch (str[ext_char_indx + 1]) {
+            case 0x80:  // Three byte capital 0xe2 0xb1 0xbf
+            case 0x90:  // Three byte capital 0xe2 0xb1 0xaf
+            case 0x91:  // Three byte capital 0xe2 0xb1 0xad
+            case 0x92:  // Three byte capital 0xe2 0xb1 0xb0
+            case 0x9c:  // Three byte capital 0xea 0x9e 0xab
+            case 0xa1:  // Three byte capital 0xea 0x9e 0xac
+            case 0xa5:  // Three byte capital 0xea 0x9e 0x8d
+            case 0xa6:  // Three byte capital 0xea 0x9e 0xaa
+            case 0xab:  // Three byte capital 0xe2 0xb1 0xa2
+            case 0xac:  // Three byte capital 0xea 0x9e 0xad
+            case 0xb1:  // Three byte capital 0xe2 0xb1 0xae
+            case 0xbd:  // Three byte capital 0xe2 0xb1 0xa4
+              break;
+            case 0x82:
+              str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            case 0x93:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x81;
+              break;
+            case 0x94:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x86;
+              break;
+            case 0x96:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x89;
+              break;
+            case 0x97:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x8a;
+              break;
+            case 0x98:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x8e;
+              break;
+            case 0x99:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x8f;
+              break;
+            case 0x9b:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x90;
+              break;
+            case 0xa0:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x93;
+              break;
+            case 0xa3:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x94;
+              break;
+            case 0xa8:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x97;
+              break;
+            case 0xa9:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x96;
+              break;
+            case 0xaf:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x9c;
+              break;
+            case 0xb2:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x9d;
+              break;
+            case 0xb5:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0x9f;
+              break;
+            default:
+              if ((str[ext_char_indx + 1] >= 0x87) &&
+                  (str[ext_char_indx + 1] <= 0x8f) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+          }
+          break;
+        case 0xca:  // Latin ext
+          switch (str[ext_char_indx + 1]) {
+            case 0x82:  // Three byte capital 0xea 0x9f 0x85
+            case 0x87:  // Three byte capital 0xea 0x9e 0xb1
+            case 0x9d:  // Three byte capital 0xea 0x9e 0xb2
+            case 0x9e:  // Three byte capital 0xea 0x9e 0xb0
+              break;
+            case 0x83:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0xa9;
+              break;
+            case 0x88:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0xae;
+              break;
+            case 0x89:
+              str[ext_char_indx] = 0xc9;
+              str[ext_char_indx + 1] = 0x84;
+              break;
+            case 0x8a:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0xb1;
+              break;
+            case 0x8b:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0xb2;
+              break;
+            case 0x8c:
+              str[ext_char_indx] = 0xc9;
+              str[ext_char_indx + 1] = 0x85;
+              break;
+            case 0x92:
+              str[ext_char_indx] = 0xc6;
+              str[ext_char_indx + 1] = 0xb7;
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xcd:  // Greek & Coptic
+          switch (str[ext_char_indx + 1]) {
+            case 0xb1:
+            case 0xb3:
+            case 0xb7:
+              str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            case 0xbb:
+              str[ext_char_indx] = 0xcf;
+              str[ext_char_indx + 1] = 0xbd;
+              break;
+            case 0xbc:
+              str[ext_char_indx] = 0xcf;
+              str[ext_char_indx + 1] = 0xbe;
+              break;
+            case 0xbd:
+              str[ext_char_indx] = 0xcf;
+              str[ext_char_indx + 1] = 0xbf;
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xce:  // Greek & Coptic
+          if (str[ext_char_indx + 1] == 0xac)
+            str[ext_char_indx + 1] = 0x86;
+          else if (str[ext_char_indx + 1] == 0xad)
+            str[ext_char_indx + 1] = 0x88;
+          else if (str[ext_char_indx + 1] == 0xae)
+            str[ext_char_indx + 1] = 0x89;
+          else if (str[ext_char_indx + 1] == 0xaf)
+            str[ext_char_indx + 1] = 0x8a;
+          else if ((str[ext_char_indx + 1] >= 0xb1) &&
+                   (str[ext_char_indx + 1] <= 0xbf))
+            str[ext_char_indx + 1] -= 0x20;  // US ASCII shift
+          break;
+        case 0xcf:  // Greek & Coptic
+          if (str[ext_char_indx + 1] <= 0x82) {
+            str[ext_char_indx] = 0xce;
+            str[ext_char_indx + 1] = 0xa3;
+          } else if ((str[ext_char_indx + 1] >= 0x80) &&
+                     (str[ext_char_indx + 1] <= 0x8b)) {
+            str[ext_char_indx] = 0xce;
+            str[ext_char_indx + 1] += 0x20;
+          } else if (str[ext_char_indx + 1] == 0x8c) {
+            str[ext_char_indx] = 0xce;
+            str[ext_char_indx + 1] = 0x8c;
+          } else if (str[ext_char_indx + 1] == 0x8d) {
+            str[ext_char_indx] = 0xce;
+            str[ext_char_indx + 1] = 0x8e;
+          } else if (str[ext_char_indx + 1] == 0x8e) {
+            str[ext_char_indx] = 0xce;
+            str[ext_char_indx + 1] = 0x8f;
+          } else if (str[ext_char_indx + 1] == 0x91)
+            str[ext_char_indx + 1] = 0xb4;
+          else if (str[ext_char_indx + 1] == 0x97)
+            str[ext_char_indx + 1] = 0x8f;
+          else if ((str[ext_char_indx + 1] >= 0x98) &&
+                   (str[ext_char_indx + 1] <= 0xaf) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xb2)
+            str[ext_char_indx + 1] = 0xb9;
+          else if (str[ext_char_indx + 1] == 0xb3) {
+            str[ext_char_indx] = 0xcd;
+            str[ext_char_indx + 1] = 0xbf;
+          } else if (str[ext_char_indx + 1] == 0xb8)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0xbb)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          break;
+        case 0xd0:  // Cyrillic
+          if ((str[ext_char_indx + 1] >= 0xb0) &&
+              (str[ext_char_indx + 1] <= 0xbf))
+            str[ext_char_indx + 1] -= 0x20;  // US ASCII shift
+          break;
+        case 0xd1:  // Cyrillic supplement
+          if ((str[ext_char_indx + 1] >= 0x80) &&
+              (str[ext_char_indx + 1] <= 0x8f)) {
+            str[ext_char_indx] = 0xd0;
+            str[ext_char_indx + 1] += 0x20;
+          } else if ((str[ext_char_indx + 1] >= 0x90) &&
+                     (str[ext_char_indx + 1] <= 0x9f)) {
+            str[ext_char_indx] = 0xd0;
+            str[ext_char_indx + 1] -= 0x10;
+          } else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                     (str[ext_char_indx + 1] <= 0xbf) &&
+                     (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;               // Prev char is upr
+          break;
+        case 0xd2:  // Cyrillic supplement
+          if (str[ext_char_indx + 1] == 0x81)
+            str[ext_char_indx + 1]--;  // Prev char is upr
+          else if ((str[ext_char_indx + 1] >= 0x8a) &&
+                   (str[ext_char_indx + 1] <= 0xbf) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          break;
+        case 0xd3:  // Cyrillic supplement
+          if ((str[ext_char_indx + 1] >= 0x81) &&
+              (str[ext_char_indx + 1] <= 0x8e) &&
+              (!(str[ext_char_indx + 1] % 2)))  // Even
+            str[ext_char_indx + 1]--;           // Prev char is upr
+          else if (str[ext_char_indx + 1] == 0x8f)
+            str[ext_char_indx + 1] = 0x80;
+          else if ((str[ext_char_indx + 1] >= 0x90) &&
+                   (str[ext_char_indx + 1] <= 0xbf) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;             // Prev char is upr
+          break;
+        case 0xd4:  // Cyrillic supplement & Armenian
+          if ((str[ext_char_indx + 1] >= 0x80) &&
+              (str[ext_char_indx + 1] <= 0xaf) &&
+              (str[ext_char_indx + 1] % 2))  // Odd
+            str[ext_char_indx + 1]--;        // Prev char is upr
+          break;
+        case 0xd5:  // Armenian
+          if ((str[ext_char_indx + 1] >= 0xa1) &&
+              (str[ext_char_indx + 1] <= 0xaf)) {
+            str[ext_char_indx] = 0xd4;
+            str[ext_char_indx + 1] += 0x10;
+          } else if ((str[ext_char_indx + 1] >= 0xb0) &&
+                     (str[ext_char_indx + 1] <= 0xbf)) {
+            str[ext_char_indx + 1] -= 0x30;
+          }
+          break;
+        case 0xd6:  // Armenian
+          if ((str[ext_char_indx + 1] >= 0x80) &&
+              (str[ext_char_indx + 1] <= 0x86)) {
+            str[ext_char_indx] = 0xd5;
+            str[ext_char_indx + 1] += 0x10;
+          }
+          break;
+        case 0xe1:  // Three byte code
+          ext_char_indx = ext_char_indx + 1;
+          switch (str[ext_char_indx]) {
+            case 0x82:  // Georgian mkhedruli
+              break;
+            case 0x83:  // Georgian mkhedruli
+              if (((str[ext_char_indx + 1] >= 0x90) &&
+                   (str[ext_char_indx + 1] <= 0xba)) ||
+                  (str[ext_char_indx + 1] == 0xbd) ||
+                  (str[ext_char_indx + 1] == 0xbe) ||
+                  (str[ext_char_indx + 1] == 0xbf)) {
+                str[ext_char_indx] = 0xb2;
+              }
+              break;
+            case 0x8f:  // Cherokee
+              if ((str[ext_char_indx + 1] >= 0xb8) &&
+                  (str[ext_char_indx + 1] <= 0xbd)) {
+                str[ext_char_indx + 1] -= 0x08;
+              }
+              break;
+            case 0xb6:  // Latin ext
+              if (str[ext_char_indx + 1] == 0x8e) {
+                str[(ext_char_indx + 1) - 2] = 0xea;
+                str[(ext_char_indx + 1) - 1] = 0x9f;
+                str[ext_char_indx + 1] = 0x86;
+              }
+              break;
+            case 0xb8:  // Latin ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0xbf) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0xb9:  // Latin ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0xbf) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0xba:  // Latin ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x93) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                       (str[ext_char_indx + 1] <= 0xbf) &&
+                       (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;             // Prev char is upr
+              break;
+            case 0xbb:  // Latin ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0xbf) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0xbc:  // Greek ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x87))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0x90) &&
+                       (str[ext_char_indx + 1] <= 0x97))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                       (str[ext_char_indx + 1] <= 0xa7))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xb0) &&
+                       (str[ext_char_indx + 1] <= 0xb7))
+                str[ext_char_indx + 1] += 0x08;
+              break;
+            case 0xbd:  // Greek ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x87))
+                str[ext_char_indx + 1] += 0x08;
+              else if (((str[ext_char_indx + 1] >= 0x90) &&
+                        (str[ext_char_indx + 1] <= 0x97)) &&
+                       (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                       (str[ext_char_indx + 1] <= 0xa7))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xb0) &&
+                       (str[ext_char_indx + 1] <= 0xb1)) {
+                str[(ext_char_indx + 1) - 1] = 0xbe;
+                str[ext_char_indx + 1] += 0x0a;
+              } else if ((str[ext_char_indx + 1] >= 0xb2) &&
+                         (str[ext_char_indx + 1] <= 0xb5)) {
+                str[(ext_char_indx + 1) - 1] = 0xbf;
+                str[ext_char_indx + 1] -= 0x2a;
+              } else if ((str[ext_char_indx + 1] >= 0xb6) &&
+                         (str[ext_char_indx + 1] <= 0xb7)) {
+                str[(ext_char_indx + 1) - 1] = 0xbf;
+                str[ext_char_indx + 1] -= 0x1e;
+              } else if ((str[ext_char_indx + 1] >= 0xb8) &&
+                         (str[ext_char_indx + 1] <= 0xb9)) {
+                str[(ext_char_indx + 1) - 1] = 0xbf;
+              } else if ((str[ext_char_indx + 1] >= 0xba) &&
+                         (str[ext_char_indx + 1] <= 0xbb)) {
+                str[(ext_char_indx + 1) - 1] = 0xbf;
+                str[ext_char_indx + 1] -= 0x10;
+              } else if ((str[ext_char_indx + 1] >= 0xbc) &&
+                         (str[ext_char_indx + 1] <= 0xbd)) {
+                str[(ext_char_indx + 1) - 1] = 0xbf;
+                str[ext_char_indx + 1] -= 0x02;
+              }
+              break;
+            case 0xbe:  // Greek ext
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x87))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0x90) &&
+                       (str[ext_char_indx + 1] <= 0x97))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                       (str[ext_char_indx + 1] <= 0xa7))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xb0) &&
+                       (str[ext_char_indx + 1] <= 0xb1))
+                str[ext_char_indx + 1] += 0x08;
+              else if (str[ext_char_indx + 1] == 0xb3)
+                str[ext_char_indx + 1] += 0x09;
+              break;
+            case 0xbf:  // Greek ext
+              if (str[ext_char_indx + 1] == 0x83)
+                str[ext_char_indx + 1] += 0x09;
+              else if ((str[ext_char_indx + 1] >= 0x90) &&
+                       (str[ext_char_indx + 1] <= 0x91))
+                str[ext_char_indx + 1] += 0x08;
+              else if ((str[ext_char_indx + 1] >= 0xa0) &&
+                       (str[ext_char_indx + 1] <= 0xa1))
+                str[ext_char_indx + 1] += 0x08;
+              else if (str[ext_char_indx + 1] == 0xa5)
+                str[ext_char_indx + 1] += 0x07;
+              else if (str[ext_char_indx + 1] == 0xb3)
+                str[ext_char_indx + 1] += 0x09;
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xe2:  // Three byte code
+          ext_char_indx = ext_char_indx + 1;
+          switch (str[ext_char_indx]) {
+            case 0xb0:  // Glagolitic
+              if ((str[ext_char_indx + 1] >= 0xb0) &&
+                  (str[ext_char_indx + 1] <= 0xbf)) {
+                str[ext_char_indx + 1] -= 0x30;
+              }
+              break;
+            case 0xb1:  // Glagolitic
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x9e)) {
+                str[ext_char_indx] = 0xb0;
+                str[ext_char_indx + 1] += 0x10;
+              } else {  // Latin ext
+                switch (str[ext_char_indx + 1]) {
+                  case 0xa1:
+                  case 0xa8:
+                  case 0xaa:
+                  case 0xac:
+                  case 0xb3:
+                  case 0xb6:
+                    str[ext_char_indx + 1]--;  // Prev char is upr
+                    break;
+                  case 0xa5:  // Two byte capital  0xc8 0xba
+                  case 0xa6:  // Two byte capital  0xc8 0xbe
+                    break;
+                  default:
+                    break;
+                }
+              }
+              break;
+            case 0xb2:  // Coptic
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0xbf) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0xb3:  // Coptic
+              if (((str[ext_char_indx + 1] >= 0x80) &&
+                   (str[ext_char_indx + 1] <= 0xa3) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+                  || (str[ext_char_indx + 1] == 0xac) ||
+                  (str[ext_char_indx + 1] == 0xae) ||
+                  (str[ext_char_indx + 1] == 0xb3))
+                str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xea:  // Three byte code
+          ext_char_indx = ext_char_indx + 1;
+          switch (str[ext_char_indx]) {
+            case 0x99:  // Cyrillic
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0xad) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0x9a:  // Cyrillic
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x9b) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0x9c:  // Latin ext
+              if ((((str[ext_char_indx + 1] >= 0xa2) &&
+                    (str[ext_char_indx + 1] <= 0xaf)) ||
+                   ((str[ext_char_indx + 1] >= 0xb2) &&
+                    (str[ext_char_indx + 1] <= 0xbf))) &&
+                  (str[ext_char_indx + 1] % 2))  // Odd
+                str[ext_char_indx + 1]--;        // Prev char is upr
+              break;
+            case 0x9d:  // Latin ext
+              if (((str[ext_char_indx + 1] >= 0x80) &&
+                   (str[ext_char_indx + 1] <= 0xaf) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+                  || (str[ext_char_indx + 1] == 0xba) ||
+                  (str[ext_char_indx + 1] == 0xbc) ||
+                  (str[ext_char_indx + 1] == 0xbf))
+                str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            case 0x9e:  // Latin ext
+              if (((((str[ext_char_indx + 1] >= 0x80) &&
+                     (str[ext_char_indx + 1] <= 0x87)) ||
+                    ((str[ext_char_indx + 1] >= 0x96) &&
+                     (str[ext_char_indx + 1] <= 0xa9)) ||
+                    ((str[ext_char_indx + 1] >= 0xb4) &&
+                     (str[ext_char_indx + 1] <= 0xbf))) &&
+                   (str[ext_char_indx + 1] % 2))  // Odd
+                  || (str[ext_char_indx + 1] == 0x8c) ||
+                  (str[ext_char_indx + 1] == 0x91) ||
+                  (str[ext_char_indx + 1] == 0x93))
+                str[ext_char_indx + 1]--;  // Prev char is upr
+              else if (str[ext_char_indx + 1] == 0x94) {
+                str[(ext_char_indx + 1) - 2] = 0xea;
+                str[(ext_char_indx + 1) - 1] = 0x9f;
+                str[ext_char_indx + 1] = 0x84;
+              }
+              break;
+            case 0x9f:  // Latin ext
+              if ((str[ext_char_indx + 1] == 0x83) ||
+                  (str[ext_char_indx + 1] == 0x88) ||
+                  (str[ext_char_indx + 1] == 0x8a) ||
+                  (str[ext_char_indx + 1] == 0xb6))
+                str[ext_char_indx + 1]--;  // Prev char is upr
+              break;
+            case 0xad:  // Latin ext
+              if (str[ext_char_indx + 1] == 0x93) {
+                str[ext_char_indx] = 0x9e;
+                str[ext_char_indx + 1] = 0xb3;
+              } else if ((str[ext_char_indx + 1] >= 0xb0) &&
+                         (str[ext_char_indx + 1] <= 0xbf)) {  // Cherokee
+                str[(ext_char_indx + 1) - 2] = 0xe1;
+                str[ext_char_indx] = 0x8e;
+                str[ext_char_indx + 1] -= 0x10;
+              }
+              break;
+            case 0xae:  // Cherokee
+              if ((str[ext_char_indx + 1] >= 0x80) &&
+                  (str[ext_char_indx + 1] <= 0x8f)) {
+                str[(ext_char_indx + 1) - 2] = 0xe1;
+                str[ext_char_indx] = 0x8e;
+                str[ext_char_indx + 1] += 0x30;
+              } else if ((str[ext_char_indx + 1] >= 0x90) &&
+                         (str[ext_char_indx + 1] <= 0xbf)) {
+                str[(ext_char_indx + 1) - 2] = 0xe1;
+                str[ext_char_indx] = 0x8f;
+                str[ext_char_indx + 1] -= 0x10;
+              }
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xef:  // Three byte code
+          ext_char_indx = ext_char_indx + 1;
+          switch (str[ext_char_indx]) {
+            case 0xbd:  // Latin fullwidth
+              if ((str[ext_char_indx + 1] >= 0x81) &&
+                  (str[ext_char_indx + 1] <= 0x9a)) {
+                str[ext_char_indx] = 0xbc;
+                str[ext_char_indx + 1] += 0x20;
+              }
+              break;
+            default:
+              break;
+          }
+          break;
+        case 0xf0:  // Four byte code
+          ext_char_indx = ext_char_indx + 1;
+          switch (str[ext_char_indx]) {
+            case 0x90:
+              ext_char_indx = ext_char_indx + 1;
+              switch (str[ext_char_indx]) {
+                case 0x90:  // Deseret
+                  if ((str[ext_char_indx + 1] >= 0xa8) &&
+                      (str[ext_char_indx + 1] <= 0xbf)) {
+                    str[ext_char_indx + 1] -= 0x28;
+                  }
+                  break;
+                case 0x91:  // Deseret
+                  if ((str[ext_char_indx + 1] >= 0x80) &&
+                      (str[ext_char_indx + 1] <= 0x8f)) {
+                    str[ext_char_indx] = 0x90;
+                    str[ext_char_indx + 1] += 0x18;
+                  }
+                  break;
+                case 0x93:  // Osage
+                  if ((str[ext_char_indx + 1] >= 0x98) &&
+                      (str[ext_char_indx + 1] <= 0xa7)) {
+                    str[ext_char_indx] = 0x92;
+                    str[ext_char_indx + 1] += 0x18;
+                  } else if ((str[ext_char_indx + 1] >= 0xa8) &&
+                             (str[ext_char_indx + 1] <= 0xbb))
+                    str[ext_char_indx + 1] -= 0x28;
+                  break;
+                case 0xb3:  // Old hungarian
+                  if ((str[ext_char_indx + 1] >= 0x80) &&
+                      (str[ext_char_indx + 1] <= 0xb2))
+                    str[ext_char_indx] = 0xb2;
+                  break;
+                default:
+                  break;
+              }
+              break;
+            case 0x91:
+              ext_char_indx = ext_char_indx + 1;
+              switch (str[ext_char_indx]) {
+                case 0xa3:  // Warang citi
+                  if ((str[ext_char_indx + 1] >= 0x80) &&
+                      (str[ext_char_indx + 1] <= 0x9f)) {
+                    str[ext_char_indx] = 0xa2;
+                    str[ext_char_indx + 1] += 0x20;
+                  }
+                  break;
+                default:
+                  break;
+              }
+              break;
+            case 0x96:
+              ext_char_indx = ext_char_indx + 1;
+              switch (str[ext_char_indx]) {
+                case 0xb9:  // Medefaidrin
+                  if ((str[ext_char_indx + 1] >= 0xa0) &&
+                      (str[ext_char_indx + 1] <= 0xbf))
+                    str[ext_char_indx + 1] -= 0x20;
+                  break;
+                default:
+                  break;
+              }
+              break;
+            case 0x9E:
+              ext_char_indx = ext_char_indx + 1;
+              switch (str[ext_char_indx]) {
+                case 0xA4:  // Adlam
+                  if ((str[ext_char_indx + 1] >= 0xa2) &&
+                      (str[ext_char_indx + 1] <= 0xbf))
+                    str[ext_char_indx + 1] -= 0x22;
+                  break;
+                case 0xA5:  // Adlam
+                  if ((str[ext_char_indx + 1] >= 0x80) &&
+                      (str[ext_char_indx + 1] <= 0x83)) {
+                    str[ext_char_indx] = 0xa4;
+                    str[ext_char_indx + 1] += 0x1e;
+                  }
+                  break;
+                default:
+                  break;
+              }
+              break;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  return string(str.begin(), str.end());
 }
 
 static string replace_all(string_view s, string_view find_str, string_view replace_str) {
