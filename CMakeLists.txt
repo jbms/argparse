@@ -20,8 +20,8 @@ ExternalProject_Add(
   PREFIX ${CMAKE_CURRENT_BINARY_DIR}/third_party
   #SVN_REPOSITORY https://googletest.googlecode.com/svn/tags/release-1.7.0
   #SVN_REVISION -r 704
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG release-1.7.0
+  GIT_REPOSITORY https://github.com/google/googletest
+  GIT_TAG main
   #TIMEOUT 10
   #PATCH_COMMAND svn patch ${CMAKE_SOURCE_DIR}/gtest.patch ${CMAKE_BINARY_DIR}/ThirdParty/src/googletest
   UPDATE_COMMAND ""
